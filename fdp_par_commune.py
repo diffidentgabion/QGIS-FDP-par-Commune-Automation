@@ -8,47 +8,164 @@ Installation :
     → pointer vers le dossier contenant ce fichier, puis recharger les fournisseurs.
 """
 
+import csv
+import importlib.util
+import io
 import json
 import os
-import time
 import traceback
 
+import processing
 import requests
 from osgeo import ogr
-
-from qgis.PyQt.QtCore import QVariant
-from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QListWidget, QDialogButtonBox,
-    QLabel, QMessageBox, QFileDialog,
-)
 from qgis.core import (
-    QgsProcessingAlgorithm,
-    QgsProcessingParameterString,
-    QgsVectorLayer,
-    QgsProject,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
-    QgsGeometry,
-    QgsPointXY,
     QgsFeature,
     QgsField,
     QgsFillSymbol,
+    QgsGeometry,
     QgsLineSymbol,
     QgsMarkerSymbol,
-    QgsSingleSymbolRenderer,
+    QgsPointXY,
+    QgsProcessingAlgorithm,
+    QgsProcessingParameterString,
+    QgsProject,
     QgsRuleBasedRenderer,
+    QgsSingleSymbolRenderer,
+    QgsVectorLayer,
 )
-import processing
+from qgis.PyQt.QtCore import Qt, QMetaType, QVariant
+from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QScrollArea,
+    QSplitter,
+    QVBoxLayout,
+    QWidget,
+)
+from qgis.gui import QgsColorButton
+
+# =============================================================================
+# Chargement du module helper sirene_buildings
+# =============================================================================
+# Les scripts Processing QGIS n'ont pas de __package__ défini, donc les imports
+# relatifs échouent. On charge le fichier voisin via importlib avec son chemin
+# absolu, ce qui fonctionne quel que soit l'emplacement du script.
+_sb_spec = importlib.util.spec_from_file_location(
+    "sirene_buildings",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_buildings.py"),
+)
+_sb_mod = importlib.util.module_from_spec(_sb_spec)
+_sb_spec.loader.exec_module(_sb_mod)
+build_activity_layers = _sb_mod.build_activity_layers
+SIRENE_CATEGORIES     = _sb_mod.SIRENE_CATEGORIES
+del _sb_spec, _sb_mod
+
+# =============================================================================
+# Catalogue des couches et styles par défaut
+# =============================================================================
+
+# Ordre du catalogue = ordre initial haut → bas dans la légende QGIS.
+# Chaque entry est un dict figé ; le dialogue en fait une copie mutable.
+_LAYER_CATALOGUE = [
+    # ── Couches par défaut ────────────────────────────────────────────────────
+    # Ordre = haut → bas dans la légende (haut = rendu par-dessus)
+    {"section": "default",     "typename": None,                                            "display_name": "Établissements SIRENE",       "style_key": "sirene",           "geom_type": "point",   "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:zone_de_vegetation",                  "display_name": "Végétation",                  "style_key": "vegetation",       "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:batiment",                            "display_name": "Bâti",                        "style_key": "buildings",        "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:troncon_de_route",                    "display_name": "Voirie",                      "style_key": "roads",            "geom_type": "line",    "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:troncon_de_voie_ferree",              "display_name": "Voie ferrée",                 "style_key": "railways",         "geom_type": "line",    "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:aerodrome",                           "display_name": "Aérodrome",                   "style_key": "aerodrome",        "geom_type": "point",   "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:piste_d_aerodrome",                   "display_name": "Piste d'aérodrome",           "style_key": "piste_d_aerodrome","geom_type": "point",   "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:surface_hydrographique",              "display_name": "Hydrographie - surface",       "style_key": "water_surface",    "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:cours_d_eau",                         "display_name": "Hydrographie - cours d'eau",  "style_key": "rivers",           "geom_type": "line",    "checked": True},
+    {"section": "default",     "typename": "ADMINEXPRESS-COG-CARTO.LATEST:commune",         "display_name": "Commune (limite)",            "style_key": "commune_boundary", "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "display_name": "Parcelles cadastrales",       "style_key": "parcels",          "geom_type": "polygon", "checked": True},
+    # ── Couches recommandées ──────────────────────────────────────────────────
+    {"section": "recommended", "typename": "BDTOPO_V3:erp",                            "display_name": "ERP",                          "style_key": "erp",                      "geom_type": "polygon", "checked": False},
+    {"section": "recommended", "typename": "BDTOPO_V3:construction_surfacique",        "display_name": "Constructions surfaciques",     "style_key": "construction_surfacique",  "geom_type": "polygon", "checked": False},
+    {"section": "recommended", "typename": "BDTOPO_V3:itineraire_autre",               "display_name": "Itinéraires (vélo, pédestre)", "style_key": "itineraire_autre",         "geom_type": "line",    "checked": False},
+    {"section": "recommended", "typename": "BDTOPO_V3:haie",                           "display_name": "Haies",                        "style_key": "haie",                     "geom_type": "line",    "checked": False},
+    {"section": "recommended", "typename": "BDTOPO_V3:cimetiere",                      "display_name": "Cimetières",                   "style_key": "cimetiere",                "geom_type": "polygon", "checked": False},
+    {"section": "recommended", "typename": "BDTOPO_V3:equipement_de_transport",        "display_name": "Équipements de transport",     "style_key": "equipement_de_transport",  "geom_type": "point",   "checked": False},
+    {"section": "recommended", "typename": "BDTOPO_V3:detail_hydrographique",          "display_name": "Détails hydrographiques",      "style_key": "detail_hydrographique",    "geom_type": "point",   "checked": False},
+    {"section": "recommended", "typename": "BDTOPO_V3:foret_publique",                 "display_name": "Forêts publiques",             "style_key": "foret_publique",           "geom_type": "polygon", "checked": False},
+    # ── Couches avancées ──────────────────────────────────────────────────────
+    {"section": "advanced",    "typename": "BDTOPO_V3:canalisation",                   "display_name": "Canalisation",                 "style_key": "canalisation",             "geom_type": "line",    "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:construction_lineaire",          "display_name": "Construction linéaire",        "style_key": "construction_lineaire",    "geom_type": "line",    "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:construction_ponctuelle",        "display_name": "Construction ponctuelle",      "style_key": "construction_ponctuelle",  "geom_type": "point",   "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:detail_orographique",            "display_name": "Détail orographique",          "style_key": "detail_orographique",      "geom_type": "point",   "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:lieu_dit_non_habite",            "display_name": "Lieu-dit non habité",          "style_key": "lieu_dit_non_habite",      "geom_type": "point",   "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:point_de_repere",                "display_name": "Point de repère",              "style_key": "point_de_repere",          "geom_type": "point",   "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:pylone",                         "display_name": "Pylône",                       "style_key": "pylone",                   "geom_type": "point",   "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:reservoir",                      "display_name": "Réservoir",                    "style_key": "reservoir",                "geom_type": "polygon", "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:terrain_de_sport",               "display_name": "Terrain de sport",             "style_key": "terrain_de_sport",         "geom_type": "polygon", "checked": False},
+    {"section": "advanced",    "typename": "BDTOPO_V3:zone_d_activite_ou_d_interet",   "display_name": "Zone d'activité ou d'intérêt", "style_key": "zone_d_activite",          "geom_type": "polygon", "checked": False},
+]
+
+# Styles par défaut : style_key → dict de valeurs prêtes à l'emploi.
+# QColor avec canal alpha pour l'opacité du remplissage.
+# Clé "sirene" → None (rendu règle-par-règle, non éditable ici).
+_DEFAULT_STYLES = {
+    # ── Couches par défaut ────────────────────────────────────────────────────
+    "sirene":           None,
+    "buildings":        {"geom_type": "polygon", "fill_color": QColor(192, 192, 192, 255), "outline_color": QColor("#aaaaaa"), "outline_width": 0.1, "outline_style": "none"},
+    "roads":            {"geom_type": "line",    "line_color": QColor("#ffffff"),           "line_width": 0.5,  "line_style": "solid"},
+    "railways":         {"geom_type": "line",    "line_color": QColor("#666666"),           "line_width": 0.7,  "line_style": "solid"},
+    "aerodrome":        {"geom_type": "point",   "marker_color": QColor("#777777"),         "marker_size": 3.0},
+    "piste_d_aerodrome":{"geom_type": "point",   "marker_color": QColor("#999999"),         "marker_size": 2.0},
+    "vegetation":       {"geom_type": "polygon", "fill_color": QColor(200, 230, 196, 255),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.1, "outline_style": "none"},
+    "rivers":           {"geom_type": "line",    "line_color": QColor("#6baed6"),           "line_width": 0.8,  "line_style": "solid"},
+    "water_surface":    {"geom_type": "polygon", "fill_color": QColor(170, 211, 223, 255),  "outline_color": QColor("#6baed6"), "outline_width": 0.1, "outline_style": "none"},
+    "parcels":          {"geom_type": "polygon", "fill_color": QColor(224, 224, 224, 255),  "outline_color": QColor("#cccccc"), "outline_width": 0.1, "outline_style": "none"},
+    "commune_boundary": {"geom_type": "polygon", "fill_color": QColor(0,   0,   0,   0),   "outline_color": QColor("#000000"), "outline_width": 0.5, "outline_style": "solid"},
+    # ── Couches recommandées ──────────────────────────────────────────────────
+    "erp":                    {"geom_type": "polygon", "fill_color": QColor(244, 162,  97, 178), "outline_color": QColor("#e76f51"), "outline_width": 0.3, "outline_style": "solid"},
+    "construction_surfacique":{"geom_type": "polygon", "fill_color": QColor(208, 208, 208, 255), "outline_color": QColor("#aaaaaa"), "outline_width": 0.2, "outline_style": "solid"},
+    "itineraire_autre":       {"geom_type": "line",    "line_color": QColor("#2a9d8f"),           "line_width": 0.8,  "line_style": "dashed"},
+    "haie":                   {"geom_type": "line",    "line_color": QColor("#52b788"),           "line_width": 0.6,  "line_style": "solid"},
+    "cimetiere":              {"geom_type": "polygon", "fill_color": QColor(216, 232, 216, 255),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.3, "outline_style": "solid"},
+    "equipement_de_transport":{"geom_type": "point",   "marker_color": QColor("#8d99ae"),         "marker_size": 2.5},
+    "detail_hydrographique":  {"geom_type": "point",   "marker_color": QColor("#6baed6"),         "marker_size": 2.0},
+    "foret_publique":         {"geom_type": "polygon", "fill_color": QColor(149, 201, 158, 204),  "outline_color": QColor("#52b788"), "outline_width": 0.3, "outline_style": "solid"},
+    # ── Couches avancées ──────────────────────────────────────────────────────
+    "canalisation":            {"geom_type": "line",    "line_color": QColor("#4fc3f7"),           "line_width": 0.5,  "line_style": "solid"},
+    "construction_lineaire":   {"geom_type": "line",    "line_color": QColor("#888888"),           "line_width": 0.5,  "line_style": "solid"},
+    "construction_ponctuelle": {"geom_type": "point",   "marker_color": QColor("#888888"),         "marker_size": 2.0},
+    "detail_orographique":     {"geom_type": "point",   "marker_color": QColor("#b5838d"),         "marker_size": 2.0},
+    "lieu_dit_non_habite":     {"geom_type": "point",   "marker_color": QColor("#555555"),         "marker_size": 2.0},
+    "point_de_repere":         {"geom_type": "point",   "marker_color": QColor("#e63946"),         "marker_size": 2.0},
+    "pylone":                  {"geom_type": "point",   "marker_color": QColor("#aaaaaa"),         "marker_size": 2.0},
+    "reservoir":               {"geom_type": "polygon", "fill_color": QColor(144, 224, 239, 204),  "outline_color": QColor("#6baed6"), "outline_width": 0.3, "outline_style": "solid"},
+    "terrain_de_sport":        {"geom_type": "polygon", "fill_color": QColor(168, 218, 220, 204),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.2, "outline_style": "solid"},
+    "zone_d_activite":         {"geom_type": "polygon", "fill_color": QColor(255, 209, 102, 128),  "outline_color": QColor("#ccaa00"), "outline_width": 0.3, "outline_style": "solid"},
+}
 
 
 # =============================================================================
 # Algorithme principal
 # =============================================================================
 
+
 class FDPParCommune(QgsProcessingAlgorithm):
     """Charge automatiquement un fond de plan complet pour une commune française."""
 
-    NOM_COMMUNE = 'NOM_COMMUNE'
+    NOM_COMMUNE = "NOM_COMMUNE"
 
     # ── Métadonnées Processing ────────────────────────────────────────────────
 
@@ -59,23 +176,23 @@ class FDPParCommune(QgsProcessingAlgorithm):
         return super().flags() | QgsProcessingAlgorithm.FlagNoThreading
 
     def name(self):
-        return 'fdp_par_commune'
+        return "fdp_par_commune"
 
     def displayName(self):
-        return 'FDP par Commune'
+        return "FDP par Commune"
 
     def group(self):
-        return 'Fond de Plan'
+        return "Fond de Plan"
 
     def groupId(self):
-        return 'fond_de_plan'
+        return "fond_de_plan"
 
     def shortHelpString(self):
         return (
-            'Génère un fond de plan communal à partir de sources ouvertes :\n'
-            '  • IGN Géoplateforme WFS (ADMIN EXPRESS, Cadastre, BD TOPO)\n'
-            '  • Géo-SIRENE (établissements)\n\n'
-            'Saisissez un nom de commune (recherche partielle acceptée).'
+            "Génère un fond de plan communal à partir de sources ouvertes :\n"
+            "  • IGN Géoplateforme WFS (ADMIN EXPRESS, Cadastre, BD TOPO)\n"
+            "  • Géo-SIRENE (établissements)\n\n"
+            "Saisissez un nom de commune (recherche partielle acceptée)."
         )
 
     def createInstance(self):
@@ -85,8 +202,8 @@ class FDPParCommune(QgsProcessingAlgorithm):
         self.addParameter(
             QgsProcessingParameterString(
                 self.NOM_COMMUNE,
-                'Nom de la commune',
-                defaultValue='',
+                "Nom de la commune",
+                defaultValue="",
             )
         )
 
@@ -96,151 +213,167 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         # ── 1. Recherche et sélection de la commune ──────────────────────────
         nom_input = self.parameterAsString(parameters, self.NOM_COMMUNE, context)
-        feedback.pushInfo(f'Recherche de la commune : {nom_input}…')
+        feedback.pushInfo(f"Recherche de la commune : {nom_input}…")
 
-        commune = self._search_commune(nom_input, feedback)
+        commune = self._search_commune(nom_input)
         if commune is None:
-            raise Exception('Aucune commune sélectionnée. Traitement annulé.')
+            raise Exception("Aucune commune sélectionnée. Traitement annulé.")
 
-        nom   = commune['nom']
-        insee = commune['code']
-        dep   = self._get_dep(insee)
-        feedback.pushInfo(f'Commune : {nom}  |  INSEE : {insee}  |  Département : {dep}')
+        nom = commune["nom"]
+        insee = commune["code"]
+        dep = self._get_dep(insee)
+        feedback.pushInfo(
+            f"Commune : {nom}  |  INSEE : {insee}  |  Département : {dep}"
+        )
         feedback.setProgress(5)
 
         # ── 2. Géométrie communale reprojetée en EPSG:2154 ───────────────────
-        crs_4326 = QgsCoordinateReferenceSystem('EPSG:4326')
-        crs_2154 = QgsCoordinateReferenceSystem('EPSG:2154')
-        xform    = QgsCoordinateTransform(crs_4326, crs_2154, QgsProject.instance())
+        crs_4326 = QgsCoordinateReferenceSystem("EPSG:4326")
+        crs_2154 = QgsCoordinateReferenceSystem("EPSG:2154")
+        xform = QgsCoordinateTransform(crs_4326, crs_2154, QgsProject.instance())
 
         # Le contour renvoyé par l'API Géo est en GeoJSON / EPSG:4326
-        commune_geom = self._geojson_to_qgsgeometry(commune['geometry'])
+        commune_geom = self._geojson_to_qgsgeometry(commune["geometry"])
         commune_geom.transform(xform)
         bbox = commune_geom.boundingBox()
-        feedback.pushInfo(f'Emprise Lambert 93 : {bbox.toString(0)}')
+        feedback.pushInfo(f"Emprise Lambert 93 : {bbox.toString(0)}")
 
         # Couche limite unique réutilisée pour tous les découpages
-        boundary_layer = self._geom_to_temp_layer(commune_geom, 'Polygon', crs_2154)
+        boundary_layer = self._geom_to_temp_layer(commune_geom, "Polygon", crs_2154)
         feedback.setProgress(10)
 
-        # ── 3. Couches WFS IGN Géoplateforme ─────────────────────────────────
-        # (typename WFS, nom d'affichage, clé de style)
-        wfs_definitions = [
-            ('ADMINEXPRESS-COG-CARTO.LATEST:commune',
-             'Commune (limite)', 'commune_boundary'),
-            ('CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle',
-             'Parcelles cadastrales', 'parcels'),
-            ('BDTOPO_V3:cours_d_eau',
-             "Hydrographie - cours d'eau", 'rivers'),
-            ('BDTOPO_V3:surface_hydrographique',
-             'Hydrographie - surface', 'water_surface'),
-            ('BDTOPO_V3:troncon_de_route',
-             'Voirie', 'roads'),
-            ('BDTOPO_V3:troncon_de_voie_ferree',
-             'Voie ferrée', 'railways'),
-            ('BDTOPO_V3:batiment',
-             'Bâti', 'buildings'),
-            ('BDTOPO_V3:zone_de_vegetation',
-             'Végétation', 'vegetation'),
-        ]
+        # ── 2.5. Sélection des couches et édition des styles ─────────────────
+        dlg_sel = _LayerSelectorDialog()
+        if dlg_sel.exec_() != QDialog.Accepted:
+            raise Exception("Sélection des couches annulée.")
+        selected_entries = dlg_sel.result_layers
+        if not selected_entries:
+            raise Exception("Aucune couche sélectionnée.")
 
-        loaded_layers = {}                         # style_key → QgsVectorLayer
-        progress_per_layer = 40 / len(wfs_definitions)
+        # ── 3. Chargement des couches WFS ────────────────────────────────────
+        loaded_layers = {}  # style_key → QgsVectorLayer
+        wfs_entries = [e for e in selected_entries if e["style_key"] != "sirene"]
+        sirene_entry = next(
+            (e for e in selected_entries if e["style_key"] == "sirene"), None
+        )
+        total_layers = len(wfs_entries) + (1 if sirene_entry else 0)
+        progress_per_layer = 40 / max(total_layers, 1)
 
-        for i, (typename, display_name, style_key) in enumerate(wfs_definitions):
+        for i, entry in enumerate(wfs_entries):
             if feedback.isCanceled():
                 return {}
-            feedback.pushInfo(f'Chargement : {display_name}…')
+            feedback.pushInfo(f"Chargement : {entry['display_name']}…")
             layer = self._load_wfs_layer(
-                typename, display_name, bbox, boundary_layer, crs_2154, feedback
+                entry["typename"], entry["display_name"],
+                bbox, boundary_layer, crs_2154, feedback,
             )
             if layer:
-                loaded_layers[style_key] = layer
+                loaded_layers[entry["style_key"]] = layer
             feedback.setProgress(10 + int((i + 1) * progress_per_layer))
 
         # ── 4. Établissements SIRENE ──────────────────────────────────────────
-        if not feedback.isCanceled():
-            feedback.pushInfo('Chargement des établissements SIRENE…')
-            sirene_layer = self._load_sirene(
-                insee, boundary_layer, crs_2154, feedback
-            )
+        if sirene_entry and not feedback.isCanceled():
+            feedback.pushInfo("Chargement des établissements SIRENE…")
+            sirene_layer = self._load_sirene(insee, boundary_layer, crs_2154, feedback)
             if sirene_layer:
-                loaded_layers['sirene'] = sirene_layer
+                loaded_layers["sirene"] = sirene_layer
         feedback.setProgress(80)
 
+        # ── 4b. Couches bâtiments colorées par activité SIRENE ───────────────
+        # build_activity_layers() fait le spatial join SIRENE × bâtiments et
+        # retourne une couche mémoire par catégorie NAF peuplée (≥ 1 bâtiment).
+        # On ne lance le calcul que si les deux couches sources sont présentes.
+        activity_layers = []
+        if (
+            not feedback.isCanceled()
+            and "sirene" in loaded_layers
+            and "buildings" in loaded_layers
+        ):
+            feedback.pushInfo("Calcul des bâtiments par activité SIRENE…")
+            activity_layers = build_activity_layers(
+                loaded_layers["buildings"], loaded_layers["sirene"], feedback
+            )
+            feedback.pushInfo(
+                f"{len(activity_layers)} couche(s) d'activité SIRENE générée(s)."
+            )
+
         # ── 5. Groupe QGIS + symbologie + ajout des couches ──────────────────
-        # group.addLayer() place chaque couche en bas de la liste des enfants
-        # (dernier index). Dans la légende QGIS, l'index 0 est EN HAUT et est
-        # rendu EN DERNIER (par-dessus tout). Donc : la première couche ajoutée
-        # ici se retrouve au SOMMET de la légende (rendue par-dessus).
-        # Ordre : couche la plus haute en premier, couche de fond en dernier.
-        layer_order = [
-            'sirene',           # index 0 → sommet → rendu par-dessus
-            'buildings',
-            'roads',
-            'railways',
-            'vegetation',
-            'rivers',
-            'water_surface',
-            'parcels',
-            'commune_boundary', # dernier → fond → rendu en dessous de tout
-        ]
+        # L'ordre du dialogue est haut → bas dans la légende.
+        # group.addLayer() ajoute en fin de liste enfants, donc le premier entry
+        # se retrouve à l'index 0 (sommet = rendu par-dessus).
+        root = QgsProject.instance().layerTreeRoot()
+        group = root.insertGroup(0, nom)
 
-        root  = QgsProject.instance().layerTreeRoot()
-        group = root.insertGroup(0, nom)   # groupe en tête de légende
+        for entry in selected_entries:
+            sk = entry["style_key"]
+            if sk not in loaded_layers:
+                continue
+            layer = loaded_layers[sk]
 
-        for style_key in layer_order:
-            if style_key in loaded_layers:
-                layer = loaded_layers[style_key]
-                self._apply_style(layer, style_key)
-                # addMapLayer(layer, False) : ajoute au projet sans le placer à
-                # la racine de l'arbre — on l'insère manuellement dans le groupe.
-                QgsProject.instance().addMapLayer(layer, False)
-                group.addLayer(layer)
+            # Avant d'ajouter le bâti de base, on insère le sous-groupe des
+            # couches colorées par activité SIRENE (s'il y en a).
+            # Ce sous-groupe apparaît juste au-dessus du bâti gris dans la légende.
+            if sk == "buildings" and activity_layers:
+                bati_group = group.addGroup("Bâti par activité SIRENE")
+                for act_layer in activity_layers:
+                    QgsProject.instance().addMapLayer(act_layer, False)
+                    bati_group.addLayer(act_layer)
+
+            if sk == "sirene":
+                # Rendu règle-par-règle NAF — non remplacé par le dialogue
+                self._apply_style(layer, "sirene")
+            elif entry.get("style") is not None:
+                self._apply_custom_style(layer, entry["style"], entry["geom_type"])
+            else:
+                self._apply_style(layer, sk)
+            # addMapLayer(layer, False) : ajoute au projet sans le placer à la
+            # racine de l'arbre — on l'insère manuellement dans le groupe.
+            QgsProject.instance().addMapLayer(layer, False)
+            group.addLayer(layer)
 
         feedback.pushInfo(
-            f'{len(loaded_layers)} couche(s) chargée(s) dans le groupe « {nom} ».'
+            f"{len(loaded_layers)} couche(s) chargée(s) dans le groupe « {nom} »."
         )
         feedback.setProgress(90)
 
         # ── 6. Proposition d'enregistrement .qgz ─────────────────────────────
         reply = QMessageBox.question(
             None,
-            'Enregistrer le projet',
-            f'Fond de plan « {nom} » créé avec succès.\n\n'
-            'Voulez-vous enregistrer le projet en fichier .qgz ?',
+            "Enregistrer le projet",
+            f"Fond de plan « {nom} » créé avec succès.\n\n"
+            "Voulez-vous enregistrer le projet en fichier .qgz ?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
-            default_filename = nom.replace(' ', '_') + '_basemap.qgz'
+            default_filename = nom.replace(" ", "_") + "_basemap.qgz"
             path, _ = QFileDialog.getSaveFileName(
                 None,
-                'Enregistrer le projet QGIS',
-                os.path.join(os.path.expanduser('~'), default_filename),
-                'Projet QGIS (*.qgz)',
+                "Enregistrer le projet QGIS",
+                os.path.join(os.path.expanduser("~"), default_filename),
+                "Projet QGIS (*.qgz)",
             )
             if path:
                 QgsProject.instance().write(path)
-                feedback.pushInfo(f'Projet enregistré : {path}')
+                feedback.pushInfo(f"Projet enregistré : {path}")
 
         feedback.setProgress(100)
-        feedback.pushInfo('Traitement terminé.')
+        feedback.pushInfo("Traitement terminé.")
         return {}
 
     # =========================================================================
     # Helper – recherche et sélection de commune
     # =========================================================================
 
-    def _search_commune(self, nom_input, feedback):
+    def _search_commune(self, nom_input):
         """
         Interroge l'API Géo gouv.fr et renvoie un dict commune, ou None si annulé.
         Le dict contient les clés : 'nom', 'code' (INSEE), 'geometry' (GeoJSON).
         """
         url = (
-            'https://geo.api.gouv.fr/communes'
-            f'?nom={requests.utils.quote(nom_input)}'
-            '&fields=nom,code,contour&format=geojson&geometry=contour'
+            "https://geo.api.gouv.fr/communes"
+            f"?nom={requests.utils.quote(nom_input)}"
+            "&fields=nom,code,contour&format=geojson&geometry=contour"
         )
         try:
             resp = requests.get(url, timeout=15)
@@ -248,16 +381,16 @@ class FDPParCommune(QgsProcessingAlgorithm):
         except requests.RequestException as e:
             raise Exception(f"Impossible de contacter l'API Géo : {e}")
 
-        features = resp.json().get('features', [])
+        features = resp.json().get("features", [])
         if not features:
             raise Exception(f"Aucune commune trouvée pour « {nom_input} ».")
 
         if len(features) == 1:
-            p = features[0]['properties']
+            p = features[0]["properties"]
             return {
-                'nom':      p['nom'],
-                'code':     p['code'],
-                'geometry': features[0]['geometry'],
+                "nom": p["nom"],
+                "code": p["code"],
+                "geometry": features[0]["geometry"],
             }
 
         # Plusieurs résultats → dialogue de sélection
@@ -278,13 +411,13 @@ class FDPParCommune(QgsProcessingAlgorithm):
           - DOM-TOM        : 3 chiffres (971–976)
           - Métropole      : 2 chiffres ('01'–'95')
         """
-        if insee_code.startswith('2A'):
-            return '2A'
-        if insee_code.startswith('2B'):
-            return '2B'
-        if insee_code.startswith('97'):
-            return insee_code[:3]   # ex. '974' → La Réunion
-        return insee_code[:2]       # ex. '75' → Paris
+        if insee_code.startswith("2A"):
+            return "2A"
+        if insee_code.startswith("2B"):
+            return "2B"
+        if insee_code.startswith("97"):
+            return insee_code[:3]  # ex. '974' → La Réunion
+        return insee_code[:2]  # ex. '75' → Paris
 
     # =========================================================================
     # Helpers – géométrie
@@ -308,8 +441,8 @@ class FDPParCommune(QgsProcessingAlgorithm):
         Crée une couche mémoire contenant une seule entité (geom).
         Utilisée comme couche de découpage (OVERLAY) dans native:clip.
         """
-        layer = QgsVectorLayer(f'{geom_type}?crs={crs.authid()}', '_boundary', 'memory')
-        feat  = QgsFeature()
+        layer = QgsVectorLayer(f"{geom_type}?crs={crs.authid()}", "_boundary", "memory")
+        feat = QgsFeature()
         feat.setGeometry(geom)
         layer.dataProvider().addFeature(feat)
         layer.updateExtents()
@@ -335,39 +468,35 @@ class FDPParCommune(QgsProcessingAlgorithm):
         """
         # URI WFS — le paramètre BBOX attend : minX,minY,maxX,maxY,CRS
         bbox_str = (
-            f'{bbox.xMinimum()},{bbox.yMinimum()},'
-            f'{bbox.xMaximum()},{bbox.yMaximum()},EPSG:2154'
+            f"{bbox.xMinimum()},{bbox.yMinimum()},"
+            f"{bbox.xMaximum()},{bbox.yMaximum()},EPSG:2154"
         )
         uri = (
-            'https://data.geopf.fr/wfs/ows'
-            '?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature'
-            f'&TYPENAME={typename}&SRSNAME=EPSG:2154&BBOX={bbox_str}'
+            "https://data.geopf.fr/wfs/ows"
+            "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+            f"&TYPENAME={typename}&SRSNAME=EPSG:2154&BBOX={bbox_str}"
         )
 
-        layer = QgsVectorLayer(uri, display_name, 'WFS')
+        layer = QgsVectorLayer(uri, display_name, "WFS")
 
         if not layer.isValid():
-            feedback.pushWarning(f'  ⚠ Couche WFS invalide : {display_name}')
+            feedback.pushWarning(f"  ⚠ Couche WFS invalide : {display_name}")
             return None
         if layer.featureCount() == 0:
-            feedback.pushWarning(f'  ⚠ Aucune entité retournée : {display_name}')
+            feedback.pushWarning(f"  ⚠ Aucune entité retournée : {display_name}")
             return None
 
         # Découpage sur le contour communal
-        try:
-            clipped = processing.run('native:clip', {
-                'INPUT':   layer,
-                'OVERLAY': boundary_layer,
-                'OUTPUT':  'memory:',
-            })['OUTPUT']
-            clipped.setName(display_name)
-            return clipped
-        except Exception as e:
-            feedback.pushWarning(
-                f'  ⚠ Erreur lors du découpage de {display_name} : {e} '
-                f'— couche non découpée utilisée en remplacement'
-            )
-            return layer   # repli : couche non découpée plutôt que rien
+        clipped = processing.run(
+            "native:clip",
+            {
+                "INPUT": layer,
+                "OVERLAY": boundary_layer,
+                "OUTPUT": "memory:",
+            },
+        )["OUTPUT"]
+        clipped.setName(display_name)
+        return clipped
 
     # =========================================================================
     # Helper – SIRENE
@@ -381,129 +510,172 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback,
     ):
         """
-        Récupère les établissements actifs via l'API Recherche d'entreprises
-        (recherche-entreprises.api.gouv.fr), page par page, et construit une
-        couche mémoire point directement en mémoire — aucun fichier temporaire.
+        Télécharge le CSV Géo-SIRENE par commune depuis files.data.gouv.fr.
 
-        L'API est limitée à 10 000 résultats (contrainte Elasticsearch) ;
-        un avertissement est émis si ce seuil est atteint.
+        Le fichier contient uniquement les établissements de la commune — pas
+        de filtrage par code commune nécessaire. Une seule requête HTTP, pas
+        de décompression, pas de pagination.
+
+        Les noms de colonnes sont normalisés en minuscules pour être robustes
+        aux éventuels changements de casse dans le fichier source.
         """
-        API_URL  = 'https://recherche-entreprises.api.gouv.fr/search'
-        PER_PAGE = 25   # maximum autorisé par l'API
-
-        # ── Couche mémoire point (EPSG:4326) avec les champs utiles ──────────
-        mem_layer = QgsVectorLayer('Point?crs=EPSG:4326', 'SIRENE_raw', 'memory')
-        pr = mem_layer.dataProvider()
-        pr.addAttributes([
-            QgsField('siret',                           QVariant.String),
-            QgsField('nom',                             QVariant.String),
-            # Nom de champ identique à l'ancien CSV : le renderer NAF ne change pas
-            QgsField('activitePrincipaleEtablissement', QVariant.String),
-            QgsField('adresse',                         QVariant.String),
-        ])
-        mem_layer.updateFields()
-
-        page        = 1
-        total_pages = 1   # mis à jour après la première réponse
-        count       = 0
+        url = f"https://files.data.gouv.fr/geo-sirene/last/communes/{insee}.csv"
+        feedback.pushInfo(f"  Téléchargement Géo-SIRENE commune {insee}…")
 
         try:
-            while page <= total_pages:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+
+            feedback.pushInfo(
+                f"  Fichier reçu ({len(resp.content) / 1024:.0f} Ko). "
+                f"Traitement en cours…"
+            )
+
+            # ── Couche mémoire point (EPSG:4326) ─────────────────────────────
+            mem_layer = QgsVectorLayer("Point?crs=EPSG:4326", "SIRENE_raw", "memory")
+            pr = mem_layer.dataProvider()
+            pr.addAttributes(
+                [
+                    QgsField("siret", QMetaType.Type.QString),
+                    QgsField("nom", QMetaType.Type.QString),
+                    QgsField("activitePrincipaleEtablissement", QMetaType.Type.QString),
+                    QgsField("adresse", QMetaType.Type.QString),
+                ]
+            )
+            mem_layer.updateFields()
+
+            # ── Lecture du CSV ────────────────────────────────────────────────
+            # Les noms de colonnes sont normalisés en minuscules une seule fois
+            # sur la ligne d'en-tête pour ne pas dépendre de la casse du fichier.
+            reader = csv.reader(io.StringIO(resp.content.decode("utf-8")))
+            headers = [h.lower() for h in next(reader)]
+            features = []
+
+            for values in reader:
                 if feedback.isCanceled():
                     return None
+                row = dict(zip(headers, values))
 
-                resp = requests.get(
-                    API_URL,
-                    params={'code_commune': insee, 'per_page': PER_PAGE, 'page': page},
-                    timeout=15,
+                # ── Filtre 1 : établissements actifs uniquement ───────────────
+                if row.get("etatadministratifetablissement") != "A":
+                    continue
+
+                # ── Filtre 2 : exclure sections T et U ───────────────────────
+                # T (97-98) = ménages employeurs (famille avec employé de maison)
+                # U (99)    = activités extraterritoriales
+                # Ces codes ne correspondent pas à des entreprises au sens urbain.
+                naf = row.get("activiteprincipaleetablissement", "")
+                if naf and naf[:2].isdigit() and int(naf[:2]) >= 97:
+                    continue
+
+                # ── Filtre 3 : nom requis ─────────────────────────────────────
+                # Priorité : enseigne (nom sur la porte) > dénomination usuelle
+                # de l'établissement > dénomination de l'unité légale > nom/prénom
+                # pour les entrepreneurs individuels.
+                # Les entités sans aucun nom sont des holdings dormantes ou des
+                # erreurs d'enregistrement — on les écarte.
+                nom = (
+                    row.get("enseigne1etablissement", "").strip()
+                    or row.get("denominationusuelleetablissement", "").strip()
+                    or row.get("denominationunitelegale", "").strip()
+                    or " ".join(
+                        filter(
+                            None,
+                            [
+                                row.get("prenom1unitelegale", "").strip(),
+                                row.get("nomunitelegale", "").strip(),
+                            ],
+                        )
+                    ).strip()
                 )
-                resp.raise_for_status()
-                data = resp.json()
+                if not nom:
+                    continue
 
-                # ── Pagination (lue une seule fois depuis la 1re réponse) ─────
-                if page == 1:
-                    total_results = data.get('total_results', 0)
-                    total_pages   = data.get('total_pages', 1)
-                    feedback.pushInfo(
-                        f'  API SIRENE : {total_results} résultat(s) '
-                        f'sur {total_pages} page(s).'
+                # ── Filtre 4 : qualité de géolocalisation ────────────────────
+                # geo_score < 0.4 = géocodage échoué, point placé au centroïde
+                # de la commune ou de la rue — position non fiable.
+                geo_score = row.get("geo_score", "")
+                if geo_score:
+                    try:
+                        if float(geo_score) < 0.4:
+                            continue
+                    except ValueError:
+                        pass  # valeur non numérique → on conserve
+
+                # ── Géométrie ────────────────────────────────────────────────
+                lat = row.get("latitude", "")
+                lon = row.get("longitude", "")
+                if not lat or not lon:
+                    continue
+
+                try:
+                    geom = QgsGeometry.fromPointXY(QgsPointXY(float(lon), float(lat)))
+                except (ValueError, TypeError):
+                    continue
+
+                # ── Adresse ──────────────────────────────────────────────────
+                adresse = " ".join(
+                    filter(
+                        None,
+                        [
+                            row.get("numerovoieetablissement", ""),
+                            row.get("indicerepetitionetablissement", ""),
+                            row.get("typevoieetablissement", ""),
+                            row.get("libellevoieetablissement", ""),
+                            row.get("codepostaletablissement", ""),
+                            row.get("libellecommuneetablissement", ""),
+                        ],
                     )
-                    if total_results >= 10000:
-                        feedback.pushWarning(
-                            '  ⚠ Plus de 10 000 établissements — la couche SIRENE '
-                            'sera incomplète (limite Elasticsearch de l\'API).'
-                        )
-
-                # ── Extraction des établissements ─────────────────────────────
-                features = []
-                for company in data.get('results', []):
-                    nom_complet = company.get('nom_complet', '')
-                    for etab in company.get('matching_etablissements', []):
-                        # Garder uniquement les établissements actifs
-                        if etab.get('etat_administratif') != 'A':
-                            continue
-                        lat = etab.get('latitude')
-                        lon = etab.get('longitude')
-                        if not lat or not lon:
-                            continue
-                        try:
-                            geom = QgsGeometry.fromPointXY(
-                                QgsPointXY(float(lon), float(lat))
-                            )
-                        except (ValueError, TypeError):
-                            continue
-                        feat = QgsFeature(mem_layer.fields())
-                        feat.setGeometry(geom)
-                        feat.setAttribute('siret',   etab.get('siret', ''))
-                        feat.setAttribute('nom',     nom_complet)
-                        feat.setAttribute(
-                            'activitePrincipaleEtablissement',
-                            etab.get('activite_principale', ''),
-                        )
-                        feat.setAttribute('adresse', etab.get('adresse', ''))
-                        features.append(feat)
-                        count += 1
-
-                pr.addFeatures(features)
-                feedback.pushInfo(
-                    f'  Page {page}/{total_pages} — {count} établissement(s) collecté(s)…'
                 )
-                page += 1
 
-                # Respecter la limite ~7 req/sec de l'API
-                if page <= total_pages:
-                    time.sleep(0.15)
+                feat = QgsFeature(mem_layer.fields())
+                feat.setGeometry(geom)
+                feat.setAttribute("siret", row.get("siret", ""))
+                feat.setAttribute("nom", nom[:254])
+                feat.setAttribute("activitePrincipaleEtablissement", naf)
+                feat.setAttribute("adresse", adresse[:254])
+                features.append(feat)
 
+            pr.addFeatures(features)
             mem_layer.updateExtents()
-            feedback.pushInfo(f'  {count} établissement(s) actif(s) chargé(s).')
+            feedback.pushInfo(
+                f"  {len(features)} établissement(s) actif(s) géolocalisé(s)."
+            )
 
-            if count == 0:
+            if not features:
+                feedback.pushWarning("  ⚠ Aucun établissement actif géolocalisé.")
                 return None
 
             # ── Reprojection EPSG:4326 → EPSG:2154 ───────────────────────────
-            reprojected = processing.run('native:reprojectlayer', {
-                'INPUT':      mem_layer,
-                'TARGET_CRS': crs_2154,
-                'OUTPUT':     'memory:',
-            })['OUTPUT']
+            reprojected = processing.run(
+                "native:reprojectlayer",
+                {
+                    "INPUT": mem_layer,
+                    "TARGET_CRS": crs_2154,
+                    "OUTPUT": "memory:",
+                },
+            )["OUTPUT"]
 
             # ── Découpage sur le contour communal ─────────────────────────────
-            clipped = processing.run('native:clip', {
-                'INPUT':   reprojected,
-                'OVERLAY': boundary_layer,
-                'OUTPUT':  'memory:',
-            })['OUTPUT']
+            clipped = processing.run(
+                "native:clip",
+                {
+                    "INPUT": reprojected,
+                    "OVERLAY": boundary_layer,
+                    "OUTPUT": "memory:",
+                },
+            )["OUTPUT"]
 
-            clipped.setName('Établissements SIRENE')
+            clipped.setName("Établissements SIRENE")
             return clipped
 
         except requests.HTTPError as e:
-            feedback.pushWarning(f'  ⚠ Erreur HTTP API SIRENE : {e}')
+            feedback.pushWarning(
+                f"  ⚠ Fichier Géo-SIRENE introuvable pour la commune {insee} : {e}"
+            )
             return None
         except Exception as e:
-            feedback.pushWarning(
-                f'  ⚠ Erreur API SIRENE : {e}\n{traceback.format_exc()}'
-            )
+            feedback.pushWarning(f"  ⚠ Erreur SIRENE : {e}\n{traceback.format_exc()}")
             return None
 
     # =========================================================================
@@ -515,57 +687,71 @@ class FDPParCommune(QgsProcessingAlgorithm):
         Applique une symbologie par défaut cohérente pour un fond de plan
         architectural : tons neutres, palette minimale.
         """
+        if style_key == "sirene":
+            self._apply_sirene_style(layer)
+            return
+
         # Chaque entrée est un callable qui renvoie un QgsSymbol configuré.
         # On utilise des lambdas pour éviter de créer des symboles inutilisés.
         style_factories = {
             # Limite communale : contour noir fin, sans remplissage
-            'commune_boundary': lambda: QgsFillSymbol.createSimple({
-                'color':         '0,0,0,0',
-                'outline_color': '#000000',
-                'outline_width': '0.5',
-            }),
+            "commune_boundary": lambda: QgsFillSymbol.createSimple(
+                {
+                    "color": "0,0,0,0",
+                    "outline_color": "#000000",
+                    "outline_width": "0.5",
+                }
+            ),
             # Parcelles cadastrales : remplissage gris très clair, sans contour
-            'parcels': lambda: QgsFillSymbol.createSimple({
-                'color':         '#e0e0e0',
-                'outline_style': 'no',
-            }),
+            "parcels": lambda: QgsFillSymbol.createSimple(
+                {
+                    "color": "#e0e0e0",
+                    "outline_style": "no",
+                }
+            ),
             # Surfaces en eau : bleu clair, sans contour
-            'water_surface': lambda: QgsFillSymbol.createSimple({
-                'color':         '#aad3df',
-                'outline_style': 'no',
-            }),
+            "water_surface": lambda: QgsFillSymbol.createSimple(
+                {
+                    "color": "#aad3df",
+                    "outline_style": "no",
+                }
+            ),
             # Cours d'eau : ligne bleu moyen
-            'rivers': lambda: QgsLineSymbol.createSimple({
-                'color': '#6baed6',
-                'width': '0.8',
-            }),
+            "rivers": lambda: QgsLineSymbol.createSimple(
+                {
+                    "color": "#6baed6",
+                    "width": "0.8",
+                }
+            ),
             # Végétation : vert très pâle, sans contour
-            'vegetation': lambda: QgsFillSymbol.createSimple({
-                'color':         '#c8e6c4',
-                'outline_style': 'no',
-            }),
+            "vegetation": lambda: QgsFillSymbol.createSimple(
+                {
+                    "color": "#c8e6c4",
+                    "outline_style": "no",
+                }
+            ),
             # Voirie : ligne blanche (s'intègre au fond clair)
-            'roads': lambda: QgsLineSymbol.createSimple({
-                'color': '#ffffff',
-                'width': '0.5',
-            }),
-            # Voie ferrée : tirets gris
-            'railways': lambda: QgsLineSymbol.createSimple({
-                'color':           '#666666',
-                'width':           '0.7',
-                'customdash':      '5;3',
-                'use_custom_dash': '1',
-            }),
+            "roads": lambda: QgsLineSymbol.createSimple(
+                {
+                    "color": "#ffffff",
+                    "width": "0.5",
+                }
+            ),
+            # Voie ferrée : ligne grise continue
+            "railways": lambda: QgsLineSymbol.createSimple(
+                {
+                    "color": "#666666",
+                    "width": "0.7",
+                }
+            ),
             # Bâti : gris moyen, sans contour
-            'buildings': lambda: QgsFillSymbol.createSimple({
-                'color':         '#c0c0c0',
-                'outline_style': 'no',
-            }),
+            "buildings": lambda: QgsFillSymbol.createSimple(
+                {
+                    "color": "#c0c0c0",
+                    "outline_style": "no",
+                }
+            ),
         }
-
-        if style_key == 'sirene':
-            self._apply_sirene_style(layer)
-            return
 
         factory = style_factories.get(style_key)
         if factory:
@@ -574,137 +760,189 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
     def _apply_sirene_style(self, layer: QgsVectorLayer):
         """
-        Rendu règle par règle des établissements SIRENE, colorés par section
-        d'activité NAF (premier caractère du code APE).
-        Les libellés sont en français pour que la légende soit lisible.
+        Rendu règle par règle des établissements SIRENE.
+
+        Les catégories s'inspirent de la Base Permanente des Équipements (BPE)
+        de l'INSEE — référence standard en urbanisme français — mais sont dérivées
+        des codes NAF SIRENE, source unique de données ici.
+
+        Différence notable avec le BPE : les pharmacies (47.73Z) et opticiens
+        (47.78A) apparaissent dans « Commerce » (leur section G dans SIRENE)
+        plutôt que dans « Santé », car le BPE procède à un reclassement fonctionnel
+        que SIRENE n'opère pas.
+
+        Forme du marqueur :
+          circle → activité visible depuis l'espace public (front de rue)
+          square → activité de fond, génératrice d'emploi sans façade publique
         """
-        # Format : (code_section, libellé, couleur, forme_marqueur)
-        #
-        # forme = 'circle'  → présence probable en rez-de-chaussée (flux piéton) :
-        #                      commerce, restauration, santé, enseignement,
-        #                      culture/sport, services personnels
-        # forme = 'square'  → bureau ou activité sans front de rue :
-        #                      industrie, transport, finance, services tertiaires
-        #
-        # Classification basée sur la section NAF. Les cas limites (banques,
-        # agences immobilières, cabinets médicaux isolés) peuvent être ajustés
-        # en changeant 'square' en 'circle' sur les lignes K, L ou M.
-        naf_sections = [
-            ('A', 'Agriculture, sylviculture et pêche',              '#74C69D', 'square'),
-            ('B', 'Industries extractives',                          '#6C757D', 'square'),
-            ('C', 'Industrie manufacturière',                        '#4A4E69', 'square'),
-            ('D', 'Énergie — production et distribution',            '#2D6A4F', 'square'),
-            ('E', 'Eau, assainissement, déchets',                    '#52B788', 'square'),
-            ('F', 'Construction',                                    '#A67C52', 'square'),
-            ('G', 'Commerce ; réparation automobile',                '#F4A261', 'circle'),
-            ('H', 'Transports et entreposage',                       '#E76F51', 'square'),
-            ('I', 'Hébergement et restauration',                     '#E63946', 'circle'),
-            ('J', 'Information et communication',                    '#38B2AC', 'square'),
-            ('K', 'Activités financières et d\'assurance',           '#1F4E79', 'square'),
-            ('L', 'Activités immobilières',                          '#457B9D', 'square'),
-            ('M', 'Services spécialisés, scientifiques, techniques', '#9B5DE5', 'square'),
-            ('N', 'Services administratifs et de soutien',           '#C77DFF', 'square'),
-            ('O', 'Administration publique',                         '#9B2226', 'square'),
-            ('P', 'Enseignement',                                    '#FFD166', 'circle'),
-            ('Q', 'Santé humaine et action sociale',                 '#06D6A0', 'circle'),
-            ('R', 'Arts, spectacles et activités récréatives',       '#118AB2', 'circle'),
-            ('S', 'Autres activités de services',                    '#F48FB1', 'circle'),
-            ('T', 'Ménages employeurs',                              '#B0BEC5', 'square'),
-            ('U', 'Activités extraterritoriales',                    '#E0E0E0', 'square'),
+        # Chaque groupe : (libellé, plages_divisions_NAF, couleur, taille, forme)
+        # Les plages couvrent les divisions NAF rév. 2 (entiers sur 2 chiffres) :
+        #   A:01-03  B:05-09  C:10-33  D:35  E:36-39  F:41-43
+        #   G:45-47  H:49-53  I:55-56  J:58-63  K:64-66  L:68
+        #   M:69-75  N:77-82  O:84  P:85  Q:86-88  R:90-93  S:94-96
+        groups = [
+            # ── BPE domaine B : Commerce ──────────────────────────────────────
+            # Inclut pharmacies (47.73Z) et opticiens (47.78A) : section G SIRENE
+            ("Commerce", [(45, 47)], "#F4A261", 3.0, "circle"),
+            # ── BPE domaines G+I : Restauration & hébergement ─────────────────
+            ("Restauration & hébergement", [(55, 56)], "#E63946", 3.0, "circle"),
+            # ── BPE domaine D : Santé & action sociale ────────────────────────
+            ("Santé & action sociale", [(86, 88)], "#06D6A0", 3.0, "circle"),
+            # ── BPE domaine C : Enseignement ──────────────────────────────────
+            ("Enseignement", [(85, 85)], "#FFD166", 3.0, "circle"),
+            # ── BPE domaine H : Services publics & administration ─────────────
+            # (La Poste, NAF 53.10Z, est classée ici dans Transport & logistique)
+            ("Équipements & services publics", [(84, 84)], "#C1121F", 3.0, "square"),
+            # ── BPE domaine F : Culture, sport & loisirs ──────────────────────
+            ("Culture, sport & loisirs", [(90, 93)], "#118AB2", 3.0, "circle"),
+            # ── BPE domaine A : Services aux personnes & associations ──────────
+            (
+                "Services aux personnes & associations",
+                [(94, 96)],
+                "#F48FB1",
+                2.5,
+                "circle",
+            ),
+            # ── Hors BPE : Bureaux & services tertiaires ──────────────────────
+            # Sections J (info/comm), K (finance), L (immobilier),
+            # M (conseil/ingénierie), N (services admin.)
+            (
+                "Bureaux & services tertiaires",
+                [(58, 66), (68, 75), (77, 82)],
+                "#7B2D8B",
+                2.5,
+                "square",
+            ),
+            # ── Hors BPE : Industrie, artisanat & construction ────────────────
+            # Sections B (extractif), C (industrie), D (énergie),
+            # E (eau/déchets), F (construction)
+            (
+                "Industrie, artisanat & construction",
+                [(5, 9), (10, 43)],
+                "#8B5E3C",
+                2.5,
+                "square",
+            ),
+            # ── Hors BPE : Transport & logistique ────────────────────────────
+            ("Transport & logistique", [(49, 53)], "#6C757D", 2.5, "square"),
+            # ── Hors BPE : Agriculture ────────────────────────────────────────
+            ("Agriculture, sylviculture & pêche", [(1, 3)], "#2D6A4F", 2.5, "square"),
         ]
 
         root_rule = QgsRuleBasedRenderer.Rule(None)
 
-        for code, label, color, shape in naf_sections:
-            sym = QgsMarkerSymbol.createSimple({
-                'color':         color,
-                'name':          shape,           # 'circle' ou 'square'
-                'size':          '2.5' if shape == 'circle' else '1.8',
-                'outline_style': 'no',
-            })
+        for label, ranges, color, size, shape in groups:
+            sym = QgsMarkerSymbol.createSimple(
+                {
+                    "color": color,
+                    "name": shape,
+                    "size": str(size),
+                    "outline_style": "no",
+                }
+            )
             rule = QgsRuleBasedRenderer.Rule(sym)
-            # left() extrait la section depuis le code APE (ex. "47.11Z" → "4",
-            # mais la section est le premier CARACTÈRE ALPHABÉTIQUE du code,
-            # qui en réalité précède le code numérique dans la nomenclature.
-            # Dans le fichier SIRENE, activitePrincipaleEtablissement contient
-            # le code APE numérique (ex. "47.11Z") ; on identifie la section
-            # via la table de correspondance division→section ci-dessous.
-            # Pour simplifier l'expression QGIS, on utilise une règle sur
-            # les deux premiers chiffres du code plutôt que la lettre de section,
-            # mais la lettre de section est plus robuste — voir commentaire
-            # dans _naf_section_expr().
-            rule.setFilterExpression(self._naf_section_expr(code))
+            rule.setFilterExpression(self._naf_div_expr(ranges))
             rule.setLabel(label)
             root_rule.appendChild(rule)
 
-        # Règle de repli pour les codes non reconnus
-        other_sym = QgsMarkerSymbol.createSimple({
-            'color':         '#999999',
-            'size':          '1.5',
-            'outline_style': 'no',
-        })
+        # Règle de repli (codes absents, malformés ou NAF inconnu)
+        other_sym = QgsMarkerSymbol.createSimple(
+            {
+                "color": "#BBBBBB",
+                "name": "circle",
+                "size": "1.5",
+                "outline_style": "no",
+            }
+        )
         other_rule = QgsRuleBasedRenderer.Rule(other_sym)
-        other_rule.setFilterExpression('ELSE')
-        other_rule.setLabel('Activité non classée')
+        other_rule.setFilterExpression("ELSE")
+        other_rule.setLabel("Activité non classée")
         root_rule.appendChild(other_rule)
 
         layer.setRenderer(QgsRuleBasedRenderer(root_rule))
         layer.triggerRepaint()
 
+    # =========================================================================
+    # Helper – symbologie personnalisée (depuis _LayerSelectorDialog)
+    # =========================================================================
+
+    def _apply_custom_style(
+        self, layer: QgsVectorLayer, style: dict, geom_type: str
+    ):
+        """
+        Applique un style issu du dialogue _LayerSelectorDialog.
+        Le dict 'style' utilise des QColor avec canal alpha pour l'opacité.
+        Les valeurs de largeur/taille sont en mm (float).
+        """
+        # Convertit le style QGIS "outline_style" en valeur attendue par
+        # QgsFillSymbol / QgsLineSymbol : "solid", "dash", "no".
+        _outline_map = {"solid": "solid", "dashed": "dash", "none": "no"}
+        _line_map    = {"solid": "solid", "dashed": "dash"}
+
+        if geom_type == "polygon":
+            fc = style.get("fill_color", QColor(200, 200, 200, 255))
+            oc = style.get("outline_color", QColor("#000000"))
+            ow = style.get("outline_width", 0.3)
+            os_ = _outline_map.get(style.get("outline_style", "none"), "no")
+            # Encode RGBA pour que QGIS respecte l'opacité du remplissage
+            color_str = f"{fc.red()},{fc.green()},{fc.blue()},{fc.alpha()}"
+            sym = QgsFillSymbol.createSimple({
+                "color": color_str,
+                "outline_color": oc.name(),
+                "outline_width": str(ow),
+                "outline_style": os_,
+            })
+
+        elif geom_type == "line":
+            lc = style.get("line_color", QColor("#888888"))
+            lw = style.get("line_width", 0.5)
+            ls_ = _line_map.get(style.get("line_style", "solid"), "solid")
+            props = {"color": lc.name(), "width": str(lw)}
+            if ls_ == "dash":
+                props["customdash"] = "5;3"
+                props["use_custom_dash"] = "1"
+            sym = QgsLineSymbol.createSimple(props)
+
+        elif geom_type == "point":
+            mc = style.get("marker_color", QColor("#333333"))
+            ms = style.get("marker_size", 2.0)
+            sym = QgsMarkerSymbol.createSimple({
+                "color": mc.name(),
+                "name": "circle",
+                "size": str(ms),
+                "outline_style": "no",
+            })
+
+        else:
+            return  # type inconnu, on laisse le style par défaut
+
+        layer.setRenderer(QgsSingleSymbolRenderer(sym))
+        layer.triggerRepaint()
+
     @staticmethod
-    def _naf_section_expr(section_letter: str) -> str:
+    def _naf_div_expr(ranges: list) -> str:
         """
-        Renvoie une expression QGIS qui correspond à un code APE appartenant
-        à la section NAF donnée.
+        Renvoie une expression QGIS filtrant les établissements dont le code NAF
+        (format SIRENE : "DD.DDL", ex. "47.11Z") tombe dans l'une des plages de
+        divisions indiquées.
 
-        Le code APE dans SIRENE est au format "DD.DDL" (ex. "47.11Z").
-        La correspondance division→section est définie par l'INSEE :
-        on teste si le numéro de division (2 premiers chiffres) tombe dans
-        la plage de chaque section.
+        La division est l'entier formé par les 2 premiers caractères du code :
+          "47.11Z" → to_int("47") = 47 → section G (Commerce).
 
-        Plages de divisions par section (nomenclature NAF rév. 2) :
-          A:01-03  B:05-09  C:10-33  D:35     E:36-39  F:41-43
-          G:45-47  H:49-53  I:55-56  J:58-63  K:64-66  L:68
-          M:69-75  N:77-82  O:84     P:85     Q:86-88  R:90-93
-          S:94-96  T:97-98  U:99
+        Chaque groupe peut couvrir plusieurs plages non contiguës, ce qui permet
+        de regrouper plusieurs sections NAF en une seule catégorie BPE.
+        Ex. : Bureaux & services tertiaires = [(58,66),(68,75),(77,82)]
+              couvre J (58-63) + K (64-66) + L (68) + M (69-75) + N (77-82).
         """
-        # Plages de numéros de division (entiers) pour chaque section
-        ranges = {
-            'A': [(1,  3)],
-            'B': [(5,  9)],
-            'C': [(10, 33)],
-            'D': [(35, 35)],
-            'E': [(36, 39)],
-            'F': [(41, 43)],
-            'G': [(45, 47)],
-            'H': [(49, 53)],
-            'I': [(55, 56)],
-            'J': [(58, 63)],
-            'K': [(64, 66)],
-            'L': [(68, 68)],
-            'M': [(69, 75)],
-            'N': [(77, 82)],
-            'O': [(84, 84)],
-            'P': [(85, 85)],
-            'Q': [(86, 88)],
-            'R': [(90, 93)],
-            'S': [(94, 96)],
-            'T': [(97, 98)],
-            'U': [(99, 99)],
-        }
-        # Construire les clauses BETWEEN sur to_int(left(code, 2))
-        # left("activitePrincipaleEtablissement", 2) donne "47" pour "47.11Z"
         field = 'to_int(left("activitePrincipaleEtablissement", 2))'
-        clauses = [
-            f'({field} BETWEEN {lo} AND {hi})'
-            for lo, hi in ranges.get(section_letter, [])
-        ]
-        return ' OR '.join(clauses) if clauses else 'FALSE'
+        clauses = [f"({field} BETWEEN {lo} AND {hi})" for lo, hi in ranges]
+        return " OR ".join(clauses) if clauses else "FALSE"
 
 
 # =============================================================================
 # Dialogue de sélection de commune
 # =============================================================================
+
 
 class _CommuneSelectDialog(QDialog):
     """
@@ -714,24 +952,26 @@ class _CommuneSelectDialog(QDialog):
 
     def __init__(self, features: list, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('Sélectionner une commune')
+        self.setWindowTitle("Sélectionner une commune")
         self.setMinimumWidth(400)
         self.selected_commune = None
         self._features = features
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            f'{len(features)} communes correspondent à votre recherche.\n'
-            'Sélectionnez la commune souhaitée :'
-        ))
+        layout.addWidget(
+            QLabel(
+                f"{len(features)} communes correspondent à votre recherche.\n"
+                "Sélectionnez la commune souhaitée :"
+            )
+        )
 
         self._list = QListWidget()
         for feat in features:
-            p    = feat['properties']
-            nom  = p['nom']
-            code = p['code']
+            p = feat["properties"]
+            nom = p["nom"]
+            code = p["code"]
             # Afficher le nom et le code INSEE complet pour lever toute ambiguïté
-            self._list.addItem(f'{nom}  —  {code}')
+            self._list.addItem(f"{nom}  —  {code}")
         self._list.setCurrentRow(0)
         self._list.itemDoubleClicked.connect(self.accept)
         layout.addWidget(self._list)
@@ -745,10 +985,369 @@ class _CommuneSelectDialog(QDialog):
         row = self._list.currentRow()
         if row >= 0:
             feat = self._features[row]
-            p    = feat['properties']
+            p = feat["properties"]
             self.selected_commune = {
-                'nom':      p['nom'],
-                'code':     p['code'],
-                'geometry': feat['geometry'],
+                "nom": p["nom"],
+                "code": p["code"],
+                "geometry": feat["geometry"],
             }
+        super().accept()
+
+
+# =============================================================================
+# Dialogue de sélection et de style des couches
+# =============================================================================
+
+
+class _LayerSelectorDialog(QDialog):
+    """
+    Dialogue affiché avant tout chargement. L'utilisateur choisit les couches
+    à charger, leur ordre dans la légende, et leurs styles par défaut.
+
+    Renvoie result_layers : liste ordonnée de dicts (haut → bas dans la légende)
+    avec les clés typename, display_name, style_key, geom_type, style (dict ou None).
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Sélection et style des couches")
+        self.setMinimumSize(1000, 640)
+        self.result_layers = []
+
+        # Copie mutable des styles : style_key → dict (modifié en temps réel)
+        self._styles = {}
+        for entry in _LAYER_CATALOGUE:
+            sk = entry["style_key"]
+            default = _DEFAULT_STYLES.get(sk)
+            if default is not None:
+                self._styles[sk] = dict(default)
+
+        # Registre des checkboxes : style_key → QCheckBox
+        self._checkboxes = {}
+
+        self._build_ui()
+        self._populate_order_list()
+
+    # ── Construction de l'interface ───────────────────────────────────────────
+
+    def _build_ui(self):
+        root_layout = QVBoxLayout(self)
+
+        splitter = QSplitter(Qt.Horizontal)
+        root_layout.addWidget(splitter)
+
+        # ── Panneau gauche : catalogue ────────────────────────────────────────
+        left_outer = QWidget()
+        left_layout = QVBoxLayout(left_outer)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(6, 6, 6, 6)
+
+        self._build_section(scroll_layout, "Couches par défaut",    "default",     collapsible=False)
+        self._build_section(scroll_layout, "Couches recommandées",  "recommended", collapsible=False)
+        self._build_section(scroll_layout, "Couches avancées",      "advanced",    collapsible=True)
+        scroll_layout.addStretch()
+
+        scroll.setWidget(scroll_content)
+        left_layout.addWidget(scroll)
+        splitter.addWidget(left_outer)
+
+        # ── Panneau droit : ordre + éditeur de style ──────────────────────────
+        right_outer = QWidget()
+        right_layout = QVBoxLayout(right_outer)
+        splitter.addWidget(right_outer)
+
+        # Liste d'ordre
+        order_group = QGroupBox("Ordre des couches  (haut = rendu par-dessus)")
+        order_vbox = QVBoxLayout(order_group)
+
+        self._order_list = QListWidget()
+        self._order_list.setDragDropMode(QAbstractItemView.InternalMove)
+        order_vbox.addWidget(self._order_list)
+
+        arrow_layout = QHBoxLayout()
+        self._btn_up   = QPushButton("▲ Monter")
+        self._btn_down = QPushButton("▼ Descendre")
+        arrow_layout.addWidget(self._btn_up)
+        arrow_layout.addWidget(self._btn_down)
+        order_vbox.addLayout(arrow_layout)
+        right_layout.addWidget(order_group, stretch=2)
+
+        # Éditeur de style
+        self._style_group = QGroupBox("Style de la couche sélectionnée")
+        self._style_vbox  = QVBoxLayout(self._style_group)
+        # _style_content est le seul enfant direct de _style_vbox.
+        # On le remplace en entier (replaceWidget) plutôt que de modifier son
+        # contenu widget par widget — cela évite le clignotement causé par
+        # deleteLater() qui est asynchrone et laisse les anciens widgets visibles
+        # le temps que le prochain tour d'event loop les supprime.
+        self._style_content = QWidget()
+        QVBoxLayout(self._style_content).addWidget(
+            QLabel("Sélectionnez une couche dans la liste.")
+        )
+        self._style_vbox.addWidget(self._style_content)
+        right_layout.addWidget(self._style_group, stretch=3)
+
+        # Boutons OK / Annuler
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root_layout.addWidget(buttons)
+
+        splitter.setSizes([380, 620])
+
+        # Connexions
+        self._btn_up.clicked.connect(lambda: self._move_row(-1))
+        self._btn_down.clicked.connect(lambda: self._move_row(1))
+        self._order_list.currentRowChanged.connect(self._on_selection_changed)
+
+    def _build_section(self, parent_layout, title, section, collapsible):
+        """Construit un QGroupBox avec les checkboxes de la section donnée."""
+        entries = [e for e in _LAYER_CATALOGUE if e["section"] == section]
+        group = QGroupBox(title)
+        group_vbox = QVBoxLayout(group)
+
+        if collapsible:
+            # Technique collapse : QGroupBox checkable + conteneur masquable.
+            # Quand le groupe est décoché, le conteneur est masqué → la boîte
+            # se réduit à sa seule barre de titre.
+            group.setCheckable(True)
+            group.setChecked(False)  # fermé par défaut
+            container = QWidget()
+            container_vbox = QVBoxLayout(container)
+            container_vbox.setContentsMargins(0, 0, 0, 0)
+            for entry in entries:
+                cb = self._make_checkbox(entry)
+                container_vbox.addWidget(cb)
+            group_vbox.addWidget(container)
+            container.setVisible(False)
+            group.toggled.connect(container.setVisible)
+        else:
+            for entry in entries:
+                cb = self._make_checkbox(entry)
+                group_vbox.addWidget(cb)
+
+        parent_layout.addWidget(group)
+
+    def _make_checkbox(self, entry):
+        cb = QCheckBox(entry["display_name"])
+        cb.setChecked(entry["checked"])
+        cb.stateChanged.connect(lambda state, e=entry: self._on_check_changed(state, e))
+        self._checkboxes[entry["style_key"]] = cb
+        return cb
+
+    # ── Gestion de la liste d'ordre ───────────────────────────────────────────
+
+    def _populate_order_list(self):
+        """Remplit la liste avec les couches cochées par défaut."""
+        for entry in _LAYER_CATALOGUE:
+            if entry["checked"]:
+                self._add_to_order(entry)
+
+    def _add_to_order(self, entry):
+        item = QListWidgetItem(entry["display_name"])
+        item.setData(Qt.UserRole, entry["style_key"])
+        self._order_list.addItem(item)
+
+    def _remove_from_order(self, style_key):
+        for i in range(self._order_list.count()):
+            if self._order_list.item(i).data(Qt.UserRole) == style_key:
+                self._order_list.takeItem(i)
+                return
+
+    def _on_check_changed(self, state, entry):
+        if state == Qt.Checked:
+            self._add_to_order(entry)
+        else:
+            self._remove_from_order(entry["style_key"])
+            # Effacer l'éditeur si la couche décochée était sélectionnée
+            if self._order_list.currentRow() < 0:
+                self._clear_style_editor()
+
+    def _move_row(self, delta):
+        row = self._order_list.currentRow()
+        if row < 0:
+            return
+        new_row = row + delta
+        if new_row < 0 or new_row >= self._order_list.count():
+            return
+        # Bloquer currentRowChanged pendant le déplacement : takeItem() déclenche
+        # le signal avec la mauvaise ligne, ce qui corromprait l'éditeur de style.
+        self._order_list.blockSignals(True)
+        item = self._order_list.takeItem(row)
+        self._order_list.insertItem(new_row, item)
+        self._order_list.setCurrentRow(new_row)
+        self._order_list.blockSignals(False)
+        # Mise à jour manuelle après déplacement complet
+        self._on_selection_changed(new_row)
+
+    # ── Éditeur de style ──────────────────────────────────────────────────────
+
+    def _on_selection_changed(self, row):
+        if row < 0:
+            self._clear_style_editor()
+            return
+        sk = self._order_list.item(row).data(Qt.UserRole)
+        entry = next((e for e in _LAYER_CATALOGUE if e["style_key"] == sk), None)
+        if entry:
+            self._rebuild_style_editor(entry)
+
+    def _clear_style_editor(self):
+        self._swap_style_content(QLabel("Sélectionnez une couche dans la liste."))
+
+    def _rebuild_style_editor(self, entry):
+        """Remplace _style_content de façon atomique (replaceWidget) pour éviter
+        tout clignotement ou chevauchement entre anciens et nouveaux widgets."""
+        sk = entry["style_key"]
+        geom_type = entry["geom_type"]
+
+        new_content = QWidget()
+        lay = QVBoxLayout(new_content)
+
+        if sk == "sirene":
+            lay.addWidget(
+                QLabel("Style SIRENE : rendu par règles NAF (non modifiable ici).")
+            )
+            lay.addStretch()
+            self._swap_style_content(new_content)
+            return
+
+        # S'assurer que le style existe dans le registre mutable
+        if sk not in self._styles:
+            default = _DEFAULT_STYLES.get(sk)
+            self._styles[sk] = dict(default) if default else {}
+        style = self._styles[sk]
+
+        form = QFormLayout()
+
+        if geom_type == "polygon":
+            fill_btn = QgsColorButton()
+            fill_btn.setAllowOpacity(True)
+            fill_btn.setColor(style.get("fill_color", QColor(200, 200, 200, 255)))
+            fill_btn.colorChanged.connect(
+                lambda col, s=style: s.update({"fill_color": QColor(col)})
+            )
+            form.addRow("Remplissage :", fill_btn)
+
+            out_col_btn = QgsColorButton()
+            out_col_btn.setColor(style.get("outline_color", QColor("#000000")))
+            out_col_btn.colorChanged.connect(
+                lambda col, s=style: s.update({"outline_color": QColor(col)})
+            )
+            form.addRow("Contour — couleur :", out_col_btn)
+
+            out_w = QDoubleSpinBox()
+            out_w.setRange(0.0, 5.0)
+            out_w.setSingleStep(0.1)
+            out_w.setDecimals(1)
+            out_w.setSuffix(" mm")
+            out_w.setValue(style.get("outline_width", 0.3))
+            out_w.valueChanged.connect(
+                lambda val, s=style: s.update({"outline_width": val})
+            )
+            form.addRow("Contour — épaisseur :", out_w)
+
+            out_style_combo = QComboBox()
+            out_style_combo.addItems(["Plein", "Tirets", "Aucun"])
+            out_style_combo.setCurrentIndex(
+                {"solid": 0, "dashed": 1, "none": 2}.get(
+                    style.get("outline_style", "none"), 2
+                )
+            )
+            out_style_combo.currentIndexChanged.connect(
+                lambda idx, s=style: s.update(
+                    {"outline_style": ["solid", "dashed", "none"][idx]}
+                )
+            )
+            form.addRow("Contour — style :", out_style_combo)
+
+        elif geom_type == "line":
+            line_btn = QgsColorButton()
+            line_btn.setColor(style.get("line_color", QColor("#888888")))
+            line_btn.colorChanged.connect(
+                lambda col, s=style: s.update({"line_color": QColor(col)})
+            )
+            form.addRow("Couleur :", line_btn)
+
+            lw = QDoubleSpinBox()
+            lw.setRange(0.0, 5.0)
+            lw.setSingleStep(0.1)
+            lw.setDecimals(1)
+            lw.setSuffix(" mm")
+            lw.setValue(style.get("line_width", 0.5))
+            lw.valueChanged.connect(
+                lambda val, s=style: s.update({"line_width": val})
+            )
+            form.addRow("Épaisseur :", lw)
+
+            ls_combo = QComboBox()
+            ls_combo.addItems(["Plein", "Tirets"])
+            ls_combo.setCurrentIndex(
+                {"solid": 0, "dashed": 1}.get(style.get("line_style", "solid"), 0)
+            )
+            ls_combo.currentIndexChanged.connect(
+                lambda idx, s=style: s.update(
+                    {"line_style": ["solid", "dashed"][idx]}
+                )
+            )
+            form.addRow("Style :", ls_combo)
+
+        elif geom_type == "point":
+            marker_btn = QgsColorButton()
+            marker_btn.setColor(style.get("marker_color", QColor("#333333")))
+            marker_btn.colorChanged.connect(
+                lambda col, s=style: s.update({"marker_color": QColor(col)})
+            )
+            form.addRow("Couleur :", marker_btn)
+
+            ms = QDoubleSpinBox()
+            ms.setRange(0.5, 10.0)
+            ms.setSingleStep(0.5)
+            ms.setDecimals(1)
+            ms.setSuffix(" mm")
+            ms.setValue(style.get("marker_size", 2.0))
+            ms.valueChanged.connect(
+                lambda val, s=style: s.update({"marker_size": val})
+            )
+            form.addRow("Taille :", ms)
+
+        lay.addLayout(form)
+        btn_reset = QPushButton("Réinitialiser")
+        btn_reset.clicked.connect(lambda: self._reset_style(entry))
+        lay.addWidget(btn_reset)
+        lay.addStretch()
+        self._swap_style_content(new_content)
+
+    def _swap_style_content(self, new_widget):
+        """Remplace _style_content par new_widget de façon synchrone et atomique."""
+        self._style_vbox.replaceWidget(self._style_content, new_widget)
+        self._style_content.hide()   # masquage immédiat (synchrone)
+        self._style_content.deleteLater()
+        self._style_content = new_widget
+
+    def _reset_style(self, entry):
+        """Remet le style de la couche aux valeurs codées dans _DEFAULT_STYLES."""
+        sk = entry["style_key"]
+        default = _DEFAULT_STYLES.get(sk)
+        if default is not None:
+            self._styles[sk] = dict(default)
+        self._rebuild_style_editor(entry)
+
+    # ── Validation ────────────────────────────────────────────────────────────
+
+    def accept(self):
+        """Collecte l'ordre et les styles puis ferme le dialogue."""
+        self.result_layers = []
+        for i in range(self._order_list.count()):
+            sk = self._order_list.item(i).data(Qt.UserRole)
+            entry = next((e for e in _LAYER_CATALOGUE if e["style_key"] == sk), None)
+            if entry is None:
+                continue
+            result_entry = dict(entry)
+            result_entry["style"] = self._styles.get(sk)  # None pour SIRENE
+            self.result_layers.append(result_entry)
         super().accept()
