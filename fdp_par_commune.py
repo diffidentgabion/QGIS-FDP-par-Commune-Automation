@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 FDP par Commune — Génération automatique d'un fond de plan communal
@@ -76,6 +77,15 @@ build_activity_layers = _sb_mod.build_activity_layers
 SIRENE_CATEGORIES     = _sb_mod.SIRENE_CATEGORIES
 del _sb_spec, _sb_mod
 
+_zb_spec = importlib.util.spec_from_file_location(
+    "zone_buildings",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "zone_buildings.py"),
+)
+_zb_mod = importlib.util.module_from_spec(_zb_spec)
+_zb_spec.loader.exec_module(_zb_mod)
+build_zone_activity_layers = _zb_mod.build_zone_activity_layers
+del _zb_spec, _zb_mod
+
 # =============================================================================
 # Catalogue des couches et styles par défaut
 # =============================================================================
@@ -87,6 +97,7 @@ _LAYER_CATALOGUE = [
     # Ordre = haut → bas dans la légende (haut = rendu par-dessus)
     {"section": "default",     "typename": None,                                            "display_name": "Établissements SIRENE",       "style_key": "sirene",           "geom_type": "point",   "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:zone_de_vegetation",                  "display_name": "Végétation",                  "style_key": "vegetation",       "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:zone_d_activite_ou_d_interet",        "display_name": "Zones d'activité et d'intérêt","style_key": "zai",              "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:batiment",                            "display_name": "Bâti",                        "style_key": "buildings",        "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:troncon_de_route",                    "display_name": "Voirie",                      "style_key": "roads",            "geom_type": "line",    "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:troncon_de_voie_ferree",              "display_name": "Voie ferrée",                 "style_key": "railways",         "geom_type": "line",    "checked": True},
@@ -115,7 +126,6 @@ _LAYER_CATALOGUE = [
     {"section": "advanced",    "typename": "BDTOPO_V3:pylone",                         "display_name": "Pylône",                       "style_key": "pylone",                   "geom_type": "point",   "checked": False},
     {"section": "advanced",    "typename": "BDTOPO_V3:reservoir",                      "display_name": "Réservoir",                    "style_key": "reservoir",                "geom_type": "polygon", "checked": False},
     {"section": "advanced",    "typename": "BDTOPO_V3:terrain_de_sport",               "display_name": "Terrain de sport",             "style_key": "terrain_de_sport",         "geom_type": "polygon", "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:zone_d_activite_ou_d_interet",   "display_name": "Zone d'activité ou d'intérêt", "style_key": "zone_d_activite",          "geom_type": "polygon", "checked": False},
 ]
 
 # Styles par défaut : style_key → dict de valeurs prêtes à l'emploi.
@@ -153,7 +163,7 @@ _DEFAULT_STYLES = {
     "pylone":                  {"geom_type": "point",   "marker_color": QColor("#aaaaaa"),         "marker_size": 2.0},
     "reservoir":               {"geom_type": "polygon", "fill_color": QColor(144, 224, 239, 204),  "outline_color": QColor("#6baed6"), "outline_width": 0.3, "outline_style": "solid"},
     "terrain_de_sport":        {"geom_type": "polygon", "fill_color": QColor(168, 218, 220, 204),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.2, "outline_style": "solid"},
-    "zone_d_activite":         {"geom_type": "polygon", "fill_color": QColor(255, 209, 102, 128),  "outline_color": QColor("#ccaa00"), "outline_width": 0.3, "outline_style": "solid"},
+    "zai":                     None,   # rendu règle-par-règle via _apply_zai_style, non éditable dans le dialogue
 }
 
 
@@ -279,6 +289,21 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 loaded_layers["sirene"] = sirene_layer
         feedback.setProgress(80)
 
+        # ── 4a. Filtrage des ZAI fictives ─────────────────────────────────────
+        # L'attribut 'fictif' est une chaîne "Vrai"/"Faux" dans BDTOPO WFS.
+        # On supprime en place les entités fictives sur la couche mémoire découpée.
+        zai_layer = loaded_layers.get("zai")
+        if zai_layer:
+            ids_to_delete = [
+                feat.id() for feat in zai_layer.getFeatures()
+                if str(feat["fictif"] or "").strip() == "Vrai"
+            ]
+            if ids_to_delete:
+                zai_layer.dataProvider().deleteFeatures(ids_to_delete)
+                feedback.pushInfo(
+                    f"{len(ids_to_delete)} ZAI fictive(s) supprimée(s)."
+                )
+
         # ── 4b. Couches bâtiments colorées par activité SIRENE ───────────────
         # build_activity_layers() fait le spatial join SIRENE × bâtiments et
         # retourne une couche mémoire par catégorie NAF peuplée (≥ 1 bâtiment).
@@ -297,6 +322,21 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 f"{len(activity_layers)} couche(s) d'activité SIRENE générée(s)."
             )
 
+        # ── 4c. Couches bâtiments colorées par zone d'activité (ZAI) ─────────
+        zone_layers = []
+        if (
+            not feedback.isCanceled()
+            and zai_layer
+            and "buildings" in loaded_layers
+        ):
+            feedback.pushInfo("Génération des bâtiments par zone d'activité…")
+            zone_layers = build_zone_activity_layers(
+                loaded_layers["buildings"], zai_layer, feedback
+            )
+            feedback.pushInfo(
+                f"{len(zone_layers)} couche(s) de zones générée(s)."
+            )
+
         # ── 5. Groupe QGIS + symbologie + ajout des couches ──────────────────
         # L'ordre du dialogue est haut → bas dans la légende.
         # group.addLayer() ajoute en fin de liste enfants, donc le premier entry
@@ -304,20 +344,39 @@ class FDPParCommune(QgsProcessingAlgorithm):
         root = QgsProject.instance().layerTreeRoot()
         group = root.insertGroup(0, nom)
 
+        # style_keys ajoutés programmatiquement avant leur position dans le catalogue
+        # (ZAI est inséré au moment du bâti pour respecter l'ordre de légende cible).
+        already_added = set()
+
         for entry in selected_entries:
             sk = entry["style_key"]
+            # Couches déjà insérées hors de leur position catalogue → ignorer
+            if sk in already_added:
+                continue
             if sk not in loaded_layers:
                 continue
             layer = loaded_layers[sk]
 
-            # Avant d'ajouter le bâti de base, on insère le sous-groupe des
-            # couches colorées par activité SIRENE (s'il y en a).
-            # Ce sous-groupe apparaît juste au-dessus du bâti gris dans la légende.
-            if sk == "buildings" and activity_layers:
-                bati_group = group.addGroup("Bâti par activité SIRENE")
-                for act_layer in activity_layers:
-                    QgsProject.instance().addMapLayer(act_layer, False)
-                    bati_group.addLayer(act_layer)
+            if sk == "buildings":
+                # 1. Sous-groupe bâtiments colorés par activité SIRENE
+                if activity_layers:
+                    sirene_grp = group.addGroup("Bâti par activité SIRENE")
+                    for act_layer in activity_layers:
+                        QgsProject.instance().addMapLayer(act_layer, False)
+                        sirene_grp.addLayer(act_layer)
+                # 2. Sous-groupe bâtiments colorés par zone d'activité
+                if zone_layers:
+                    zone_grp = group.addGroup("Bâti par zone d'activité")
+                    for z_layer in zone_layers:
+                        QgsProject.instance().addMapLayer(z_layer, False)
+                        zone_grp.addLayer(z_layer)
+                # 3. Couche ZAI base (entre les sous-groupes et le bâti gris)
+                if "zai" in loaded_layers:
+                    zl = loaded_layers["zai"]
+                    self._apply_style(zl, "zai")
+                    QgsProject.instance().addMapLayer(zl, False)
+                    group.addLayer(zl)
+                    already_added.add("zai")
 
             if sk == "sirene":
                 # Rendu règle-par-règle NAF — non remplacé par le dialogue
@@ -690,6 +749,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
         if style_key == "sirene":
             self._apply_sirene_style(layer)
             return
+        if style_key == "zai":
+            self._apply_zai_style(layer)
+            return
 
         # Chaque entrée est un callable qui renvoie un QgsSymbol configuré.
         # On utilise des lambdas pour éviter de créer des symboles inutilisés.
@@ -780,21 +842,47 @@ class FDPParCommune(QgsProcessingAlgorithm):
         #   A:01-03  B:05-09  C:10-33  D:35  E:36-39  F:41-43
         #   G:45-47  H:49-53  I:55-56  J:58-63  K:64-66  L:68
         #   M:69-75  N:77-82  O:84  P:85  Q:86-88  R:90-93  S:94-96
+        # Tuples : (libellé, plages_NAF, couleur, taille, forme, expr_custom)
+        # expr_custom remplace _naf_div_expr(ranges) quand il est non-None.
+        # Utilisé pour Éducation (exclusion des codes Formation) et Formation
+        # (match exact de codes dans la section P).
+        _FORMATION_CODES = (
+            "'85.51Z','85.52Z','85.53Z','85.59A','85.59B','85.60Z'"
+        )
+        _div = 'to_int(left("activitePrincipaleEtablissement", 2))'
         groups = [
             # ── BPE domaine B : Commerce ──────────────────────────────────────
             # Inclut pharmacies (47.73Z) et opticiens (47.78A) : section G SIRENE
-            ("Commerce", [(45, 47)], "#F4A261", 3.0, "circle"),
+            ("Commerce", [(45, 47)], "#F4A261", 3.0, "circle", None),
             # ── BPE domaines G+I : Restauration & hébergement ─────────────────
-            ("Restauration & hébergement", [(55, 56)], "#E63946", 3.0, "circle"),
+            ("Restauration & hébergement", [(55, 56)], "#E63946", 3.0, "circle", None),
             # ── BPE domaine D : Santé & action sociale ────────────────────────
-            ("Santé & action sociale", [(86, 88)], "#06D6A0", 3.0, "circle"),
-            # ── BPE domaine C : Enseignement ──────────────────────────────────
-            ("Enseignement", [(85, 85)], "#FFD166", 3.0, "circle"),
+            ("Santé & action sociale", [(86, 88)], "#06D6A0", 3.0, "circle", None),
+            # ── BPE domaine C (partiel) : Éducation ───────────────────────────
+            # Division 85 sauf les codes Formation continue/artistique (85.51Z…)
+            (
+                "Éducation",
+                [(85, 85)],
+                "#FFD166",
+                3.0,
+                "circle",
+                f'({_div} = 85) AND "activitePrincipaleEtablissement" NOT IN ({_FORMATION_CODES})',
+            ),
+            # ── BPE domaine C (partiel) : Formation ───────────────────────────
+            # Formation continue, artistique, sport, auto-école (85.51Z–85.60Z)
+            (
+                "Formation",
+                [],
+                "#B8A000",
+                3.0,
+                "circle",
+                f'"activitePrincipaleEtablissement" IN ({_FORMATION_CODES})',
+            ),
             # ── BPE domaine H : Services publics & administration ─────────────
             # (La Poste, NAF 53.10Z, est classée ici dans Transport & logistique)
-            ("Équipements & services publics", [(84, 84)], "#C1121F", 3.0, "square"),
+            ("Équipements & services publics", [(84, 84)], "#C1121F", 3.0, "square", None),
             # ── BPE domaine F : Culture, sport & loisirs ──────────────────────
-            ("Culture, sport & loisirs", [(90, 93)], "#118AB2", 3.0, "circle"),
+            ("Culture, sport & loisirs", [(90, 93)], "#118AB2", 3.0, "circle", None),
             # ── BPE domaine A : Services aux personnes & associations ──────────
             (
                 "Services aux personnes & associations",
@@ -802,6 +890,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 "#F48FB1",
                 2.5,
                 "circle",
+                None,
             ),
             # ── Hors BPE : Bureaux & services tertiaires ──────────────────────
             # Sections J (info/comm), K (finance), L (immobilier),
@@ -812,6 +901,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 "#7B2D8B",
                 2.5,
                 "square",
+                None,
             ),
             # ── Hors BPE : Industrie, artisanat & construction ────────────────
             # Sections B (extractif), C (industrie), D (énergie),
@@ -822,16 +912,17 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 "#8B5E3C",
                 2.5,
                 "square",
+                None,
             ),
             # ── Hors BPE : Transport & logistique ────────────────────────────
-            ("Transport & logistique", [(49, 53)], "#6C757D", 2.5, "square"),
+            ("Transport & logistique", [(49, 53)], "#6C757D", 2.5, "square", None),
             # ── Hors BPE : Agriculture ────────────────────────────────────────
-            ("Agriculture, sylviculture & pêche", [(1, 3)], "#2D6A4F", 2.5, "square"),
+            ("Agriculture, sylviculture & pêche", [(1, 3)], "#2D6A4F", 2.5, "square", None),
         ]
 
         root_rule = QgsRuleBasedRenderer.Rule(None)
 
-        for label, ranges, color, size, shape in groups:
+        for label, ranges, color, size, shape, custom_expr in groups:
             sym = QgsMarkerSymbol.createSimple(
                 {
                     "color": color,
@@ -841,7 +932,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 }
             )
             rule = QgsRuleBasedRenderer.Rule(sym)
-            rule.setFilterExpression(self._naf_div_expr(ranges))
+            rule.setFilterExpression(
+                custom_expr if custom_expr is not None else self._naf_div_expr(ranges)
+            )
             rule.setLabel(label)
             root_rule.appendChild(rule)
 
@@ -858,6 +951,54 @@ class FDPParCommune(QgsProcessingAlgorithm):
         other_rule.setFilterExpression("ELSE")
         other_rule.setLabel("Activité non classée")
         root_rule.appendChild(other_rule)
+
+        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
+        layer.triggerRepaint()
+
+    def _apply_zai_style(self, layer: QgsVectorLayer):
+        """
+        Rendu règle-par-règle des zones d'activité et d'intérêt (BDTOPO ZAI).
+
+        Hypothèse : le WFS BDTOPO_V3 retourne l'attribut 'categorie' avec les
+        accents et la casse d'origine (ex. "Santé", "Culture et loisirs") tels
+        que documentés dans le modèle de données BDTOPO_V3. Si une valeur ne
+        correspond à aucune des 8 catégories connues (ou est NULL), la règle
+        ELSE s'applique avec le remplissage de repli #E8E8E8.
+        """
+        rules_data = [
+            ("Science et enseignement",    "#FFF0B3"),
+            ("Santé",                      "#B3F5E6"),
+            ("Administratif ou militaire", "#F5B3B6"),
+            ("Industriel et commercial",   "#E8D5C4"),
+            ("Culture et loisirs",         "#B3DFF0"),
+            ("Sport",                      "#FCDEC4"),
+            ("Religieux",                  "#E0D0E8"),
+            ("Gestion des eaux",           "#C4E3F5"),
+        ]
+
+        root_rule = QgsRuleBasedRenderer.Rule(None)
+
+        for label, fill_color in rules_data:
+            sym = QgsFillSymbol.createSimple({
+                "color":         fill_color,
+                "outline_color": "#888888",
+                "outline_width": "0.2",
+            })
+            rule = QgsRuleBasedRenderer.Rule(sym)
+            rule.setFilterExpression(f'"categorie" = \'{label}\'')
+            rule.setLabel(label)
+            root_rule.appendChild(rule)
+
+        # Règle ELSE pour catégories inconnues / NULL
+        fallback_sym = QgsFillSymbol.createSimple({
+            "color":         "#E8E8E8",
+            "outline_color": "#888888",
+            "outline_width": "0.2",
+        })
+        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
+        fallback_rule.setFilterExpression("ELSE")
+        fallback_rule.setLabel("Autre / non classé")
+        root_rule.appendChild(fallback_rule)
 
         layer.setRenderer(QgsRuleBasedRenderer(root_rule))
         layer.triggerRepaint()
