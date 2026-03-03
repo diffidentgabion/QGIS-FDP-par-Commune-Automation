@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 FDP par Commune — Génération automatique d'un fond de plan communal
@@ -23,6 +22,7 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
+    QgsFeatureRequest,
     QgsField,
     QgsFillSymbol,
     QgsGeometry,
@@ -32,6 +32,7 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingParameterString,
     QgsProject,
+    QgsRasterLayer,
     QgsRuleBasedRenderer,
     QgsSingleSymbolRenderer,
     QgsVectorLayer,
@@ -84,7 +85,18 @@ _zb_spec = importlib.util.spec_from_file_location(
 _zb_mod = importlib.util.module_from_spec(_zb_spec)
 _zb_spec.loader.exec_module(_zb_mod)
 build_zone_activity_layers = _zb_mod.build_zone_activity_layers
+build_outdoor_space_layers = _zb_mod.build_outdoor_space_layers
+_ZB_OUTDOOR_PUBLIC         = _zb_mod._OUTDOOR_PUBLIC
 del _zb_spec, _zb_mod
+
+_bb_spec = importlib.util.spec_from_file_location(
+    "bati_buildings",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "bati_buildings.py"),
+)
+_bb_mod = importlib.util.module_from_spec(_bb_spec)
+_bb_spec.loader.exec_module(_bb_mod)
+build_bati_layers = _bb_mod.build_bati_layers
+del _bb_spec, _bb_mod
 
 # =============================================================================
 # Catalogue des couches et styles par défaut
@@ -97,15 +109,16 @@ _LAYER_CATALOGUE = [
     # Ordre = haut → bas dans la légende (haut = rendu par-dessus)
     {"section": "default",     "typename": None,                                            "display_name": "Établissements SIRENE",       "style_key": "sirene",           "geom_type": "point",   "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:zone_de_vegetation",                  "display_name": "Végétation",                  "style_key": "vegetation",       "geom_type": "polygon", "checked": True},
-    {"section": "default",     "typename": "BDTOPO_V3:zone_d_activite_ou_d_interet",        "display_name": "Zones d'activité et d'intérêt","style_key": "zai",              "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:batiment",                            "display_name": "Bâti",                        "style_key": "buildings",        "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:troncon_de_route",                    "display_name": "Voirie",                      "style_key": "roads",            "geom_type": "line",    "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:troncon_de_voie_ferree",              "display_name": "Voie ferrée",                 "style_key": "railways",         "geom_type": "line",    "checked": True},
-    {"section": "default",     "typename": "BDTOPO_V3:aerodrome",                           "display_name": "Aérodrome",                   "style_key": "aerodrome",        "geom_type": "point",   "checked": True},
-    {"section": "default",     "typename": "BDTOPO_V3:piste_d_aerodrome",                   "display_name": "Piste d'aérodrome",           "style_key": "piste_d_aerodrome","geom_type": "point",   "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:equipement_de_transport",             "display_name": "Équipements de transport",    "style_key": "equipement_de_transport",  "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:piste_d_aerodrome",                   "display_name": "Piste d'aérodrome",           "style_key": "piste_d_aerodrome","geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:aerodrome",                           "display_name": "Aérodrome",                   "style_key": "aerodrome",        "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:surface_hydrographique",              "display_name": "Hydrographie - surface",       "style_key": "water_surface",    "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:cours_d_eau",                         "display_name": "Hydrographie - cours d'eau",  "style_key": "rivers",           "geom_type": "line",    "checked": True},
     {"section": "default",     "typename": "ADMINEXPRESS-COG-CARTO.LATEST:commune",         "display_name": "Commune (limite)",            "style_key": "commune_boundary", "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:zone_d_activite_ou_d_interet",        "display_name": "Zones d'activité et d'intérêt","style_key": "zai",              "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "display_name": "Parcelles cadastrales",       "style_key": "parcels",          "geom_type": "polygon", "checked": True},
     # ── Couches recommandées ──────────────────────────────────────────────────
     {"section": "recommended", "typename": "BDTOPO_V3:erp",                            "display_name": "ERP",                          "style_key": "erp",                      "geom_type": "polygon", "checked": False},
@@ -113,7 +126,6 @@ _LAYER_CATALOGUE = [
     {"section": "recommended", "typename": "BDTOPO_V3:itineraire_autre",               "display_name": "Itinéraires (vélo, pédestre)", "style_key": "itineraire_autre",         "geom_type": "line",    "checked": False},
     {"section": "recommended", "typename": "BDTOPO_V3:haie",                           "display_name": "Haies",                        "style_key": "haie",                     "geom_type": "line",    "checked": False},
     {"section": "recommended", "typename": "BDTOPO_V3:cimetiere",                      "display_name": "Cimetières",                   "style_key": "cimetiere",                "geom_type": "polygon", "checked": False},
-    {"section": "recommended", "typename": "BDTOPO_V3:equipement_de_transport",        "display_name": "Équipements de transport",     "style_key": "equipement_de_transport",  "geom_type": "point",   "checked": False},
     {"section": "recommended", "typename": "BDTOPO_V3:detail_hydrographique",          "display_name": "Détails hydrographiques",      "style_key": "detail_hydrographique",    "geom_type": "point",   "checked": False},
     {"section": "recommended", "typename": "BDTOPO_V3:foret_publique",                 "display_name": "Forêts publiques",             "style_key": "foret_publique",           "geom_type": "polygon", "checked": False},
     # ── Couches avancées ──────────────────────────────────────────────────────
@@ -126,6 +138,8 @@ _LAYER_CATALOGUE = [
     {"section": "advanced",    "typename": "BDTOPO_V3:pylone",                         "display_name": "Pylône",                       "style_key": "pylone",                   "geom_type": "point",   "checked": False},
     {"section": "advanced",    "typename": "BDTOPO_V3:reservoir",                      "display_name": "Réservoir",                    "style_key": "reservoir",                "geom_type": "polygon", "checked": False},
     {"section": "advanced",    "typename": "BDTOPO_V3:terrain_de_sport",               "display_name": "Terrain de sport",             "style_key": "terrain_de_sport",         "geom_type": "polygon", "checked": False},
+    # ── Fond de référence ─────────────────────────────────────────────────────
+    {"section": "default",     "typename": None,                                            "display_name": "OpenStreetMap",               "style_key": "osm",              "geom_type": "raster",  "checked": False},
 ]
 
 # Styles par défaut : style_key → dict de valeurs prêtes à l'emploi.
@@ -137,8 +151,8 @@ _DEFAULT_STYLES = {
     "buildings":        {"geom_type": "polygon", "fill_color": QColor(192, 192, 192, 255), "outline_color": QColor("#aaaaaa"), "outline_width": 0.1, "outline_style": "none"},
     "roads":            {"geom_type": "line",    "line_color": QColor("#ffffff"),           "line_width": 0.5,  "line_style": "solid"},
     "railways":         {"geom_type": "line",    "line_color": QColor("#666666"),           "line_width": 0.7,  "line_style": "solid"},
-    "aerodrome":        {"geom_type": "point",   "marker_color": QColor("#777777"),         "marker_size": 3.0},
-    "piste_d_aerodrome":{"geom_type": "point",   "marker_color": QColor("#999999"),         "marker_size": 2.0},
+    "aerodrome":         {"geom_type": "polygon", "fill_color": QColor(210, 210, 200, 180), "outline_color": QColor("#a0a090"), "outline_width": 0.3, "outline_style": "solid"},
+    "piste_d_aerodrome": {"geom_type": "polygon", "fill_color": QColor(130, 130, 120, 220), "outline_color": QColor("#606058"), "outline_width": 0.2, "outline_style": "solid"},
     "vegetation":       {"geom_type": "polygon", "fill_color": QColor(200, 230, 196, 255),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.1, "outline_style": "none"},
     "rivers":           {"geom_type": "line",    "line_color": QColor("#6baed6"),           "line_width": 0.8,  "line_style": "solid"},
     "water_surface":    {"geom_type": "polygon", "fill_color": QColor(170, 211, 223, 255),  "outline_color": QColor("#6baed6"), "outline_width": 0.1, "outline_style": "none"},
@@ -150,7 +164,6 @@ _DEFAULT_STYLES = {
     "itineraire_autre":       {"geom_type": "line",    "line_color": QColor("#2a9d8f"),           "line_width": 0.8,  "line_style": "dashed"},
     "haie":                   {"geom_type": "line",    "line_color": QColor("#52b788"),           "line_width": 0.6,  "line_style": "solid"},
     "cimetiere":              {"geom_type": "polygon", "fill_color": QColor(216, 232, 216, 255),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.3, "outline_style": "solid"},
-    "equipement_de_transport":{"geom_type": "point",   "marker_color": QColor("#8d99ae"),         "marker_size": 2.5},
     "detail_hydrographique":  {"geom_type": "point",   "marker_color": QColor("#6baed6"),         "marker_size": 2.0},
     "foret_publique":         {"geom_type": "polygon", "fill_color": QColor(149, 201, 158, 204),  "outline_color": QColor("#52b788"), "outline_width": 0.3, "outline_style": "solid"},
     # ── Couches avancées ──────────────────────────────────────────────────────
@@ -164,7 +177,95 @@ _DEFAULT_STYLES = {
     "reservoir":               {"geom_type": "polygon", "fill_color": QColor(144, 224, 239, 204),  "outline_color": QColor("#6baed6"), "outline_width": 0.3, "outline_style": "solid"},
     "terrain_de_sport":        {"geom_type": "polygon", "fill_color": QColor(168, 218, 220, 204),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.2, "outline_style": "solid"},
     "zai":                     None,   # rendu règle-par-règle via _apply_zai_style, non éditable dans le dialogue
+    "equipement_de_transport": None,   # rendu par sublayers via build_transport_layers, non éditable dans le dialogue
 }
+
+
+# =============================================================================
+# Équipements de transport — couleurs par label (natd || nat)
+# =============================================================================
+# Valeurs observées sur le WFS Géoplateforme (échantillon 500 entités, 184 707 total).
+
+_TRANSPORT_COLORS = {
+    # ── Routes & intersections (bleu-gris — neutre mais caractère) ────────────
+    "Péage":                      "#B0BEC5",   # bleu-gris clair — péage visible
+    "Carrefour":                  "#90A4AE",   # bleu-gris moyen-clair
+    "Rond-point":                 "#607D8B",   # bleu-gris moyen
+    "Echangeur partiel":          "#546E7A",   # bleu-gris moyen-foncé
+    "Echangeur":                  "#37474F",   # bleu-gris foncé
+    # ── Ferroviaire & urbain (rouges/oranges + violet pour transit urbain) ────
+    "Station de tramway":         "#AB47BC",   # violet moyen — tramway
+    "Station de métro":           "#7B1FA2",   # violet foncé — métro
+    "Gare routière":              "#FFA000",   # ambre vif — autocar
+    "Gare RER":                   "#E53935",   # rouge vif — RER
+    "Gare voyageurs uniquement":  "#C62828",   # rouge foncé — grande gare
+    "Gare voyageurs et fret":     "#E64A19",   # orange-rouge — mixte
+    "Gare fret uniquement":       "#BF360C",   # orange brûlé foncé — fret
+    "Aire de triage":             "#4E342E",   # brun très foncé — industriel
+    # ── Ports (bleus vifs) ───────────────────────────────────────────────────
+    "Port de plaisance":          "#29B6F6",   # bleu ciel vif — loisir
+    "Port":                       "#1565C0",   # bleu marine moyen
+    "Port de commerce":           "#0D47A1",   # bleu marine foncé — commerce
+    # ── Stationnement ────────────────────────────────────────────────────────
+    "Parking":                    "#5C6BC0",   # indigo — distinct des autres groupes
+}
+
+
+def build_transport_layers(equip_layer, feedback) -> list:
+    """
+    Génère des couches mémoire pour les équipements de transport,
+    séparées par label = nature_detaillee si non vide, sinon nature.
+
+    Retourne list[QgsVectorLayer], ordonnées par _TRANSPORT_COLORS puis
+    par ordre alphabétique pour les labels inconnus.
+    """
+    # ── Étape 1 : grouper les fids par label ─────────────────────────────────
+    label_fids = {}
+    for processed, feat in enumerate(equip_layer.getFeatures()):
+        if processed % 500 == 0 and feedback.isCanceled():
+            return []
+        nat_str  = (feat["nature"]           or "").strip()
+        natd_str = (feat["nature_detaillee"] or "").strip()
+        if nat_str  == "NULL":  nat_str  = ""
+        if natd_str == "NULL":  natd_str = ""
+        label = natd_str if natd_str else nat_str
+        if not label:
+            continue
+        label_fids.setdefault(label, []).append(feat.id())
+
+    if not label_fids:
+        return []
+
+    # ── Étape 2 : couche mémoire par label ───────────────────────────────────
+    crs_id = equip_layer.crs().authid()
+    fields = equip_layer.fields()
+    results = []
+
+    known   = [l for l in _TRANSPORT_COLORS if l in label_fids]
+    unknown = sorted(l for l in label_fids if l not in _TRANSPORT_COLORS)
+
+    for label in known + unknown:
+        fids      = label_fids[label]
+        color_hex = _TRANSPORT_COLORS.get(label, "#AAAAAA")
+
+        mem_layer = QgsVectorLayer(f"Polygon?crs={crs_id}", label, "memory")
+        pr = mem_layer.dataProvider()
+        pr.addAttributes(fields.toList())
+        mem_layer.updateFields()
+        pr.addFeatures(list(equip_layer.getFeatures(
+            QgsFeatureRequest().setFilterFids(fids)
+        )))
+        mem_layer.updateExtents()
+
+        c = QColor(color_hex)
+        sym = QgsFillSymbol.createSimple({
+            "color":         f"{c.red()},{c.green()},{c.blue()},{c.alpha()}",
+            "outline_style": "no",
+        })
+        mem_layer.setRenderer(QgsSingleSymbolRenderer(sym))
+        results.append(mem_layer)
+
+    return results
 
 
 # =============================================================================
@@ -262,7 +363,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         # ── 3. Chargement des couches WFS ────────────────────────────────────
         loaded_layers = {}  # style_key → QgsVectorLayer
-        wfs_entries = [e for e in selected_entries if e["style_key"] != "sirene"]
+        wfs_entries = [e for e in selected_entries if e["typename"] is not None]
         sirene_entry = next(
             (e for e in selected_entries if e["style_key"] == "sirene"), None
         )
@@ -333,8 +434,71 @@ class FDPParCommune(QgsProcessingAlgorithm):
             zone_layers = build_zone_activity_layers(
                 loaded_layers["buildings"], zai_layer, feedback
             )
+            n_cat = len({lbl for lbl, _ in zone_layers})
             feedback.pushInfo(
-                f"{len(zone_layers)} couche(s) de zones générée(s)."
+                f"{len(zone_layers)} couche(s) de zones générée(s) "
+                f"sur {n_cat} catégorie(s) ZAI."
+            )
+
+        # ── 4c-bis. Espaces publics extérieurs (parcs, places, squares…) ───────
+        outdoor_layers = []
+        if zai_layer and not feedback.isCanceled():
+            feedback.pushInfo("Génération des espaces publics extérieurs…")
+            outdoor_layers = build_outdoor_space_layers(zai_layer, feedback)
+            feedback.pushInfo(
+                f"{len(outdoor_layers)} couche(s) d'espaces publics générée(s)."
+            )
+            # Supprimer ces entités de la couche ZAI de base pour éviter le doublon.
+            # Mêmme logique de label que dans zone_buildings.py (natd || nat).
+            if outdoor_layers:
+                ids_outdoor = []
+                for feat in zai_layer.getFeatures():
+                    natd = str(feat["nature_detaillee"] or "").strip()
+                    nat  = str(feat["nature"]           or "").strip()
+                    if natd == "NULL": natd = ""
+                    if nat  == "NULL": nat  = ""
+                    label = natd if natd else nat
+                    if label in _ZB_OUTDOOR_PUBLIC:
+                        ids_outdoor.append(feat.id())
+                if ids_outdoor:
+                    zai_layer.dataProvider().deleteFeatures(ids_outdoor)
+                    feedback.pushInfo(
+                        f"{len(ids_outdoor)} espace(s) public(s) retiré(s) de la couche ZAI."
+                    )
+
+        # ── 4d. Couches équipements de transport colorées par type ───────────
+        transport_layers = []
+        equip_layer = loaded_layers.get("equipement_de_transport")
+        if equip_layer and not feedback.isCanceled():
+            feedback.pushInfo("Génération des équipements de transport par type…")
+            transport_layers = build_transport_layers(equip_layer, feedback)
+            feedback.pushInfo(
+                f"{len(transport_layers)} couche(s) d'équipements générée(s)."
+            )
+
+        # ── 4e. Fond OSM optionnel ────────────────────────────────────────────
+        osm_entry = next(
+            (e for e in selected_entries if e["style_key"] == "osm"), None
+        )
+        if osm_entry and not feedback.isCanceled():
+            osm_uri = (
+                "type=xyz"
+                "&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+                "&zmax=19&zmin=0"
+            )
+            osm_lyr = QgsRasterLayer(osm_uri, "OpenStreetMap", "wms")
+            if osm_lyr.isValid():
+                loaded_layers["osm"] = osm_lyr
+
+        # ── 4f. Classification intrinsèque du bâti ───────────────────────────
+        bati_stats  = []
+        bati_layers = []
+        if "buildings" in loaded_layers and not feedback.isCanceled():
+            feedback.pushInfo("Classification intrinsèque du bâti…")
+            bati_stats, bati_layers = build_bati_layers(loaded_layers["buildings"], feedback)
+            feedback.pushInfo(
+                f"{len(bati_layers)} couche(s) bâti intrinsèque + "
+                f"{len(bati_stats)} couche(s) statistique(s) générée(s)."
             )
 
         # ── 5. Groupe QGIS + symbologie + ajout des couches ──────────────────
@@ -344,49 +508,62 @@ class FDPParCommune(QgsProcessingAlgorithm):
         root = QgsProject.instance().layerTreeRoot()
         group = root.insertGroup(0, nom)
 
-        # style_keys ajoutés programmatiquement avant leur position dans le catalogue
-        # (ZAI est inséré au moment du bâti pour respecter l'ordre de légende cible).
-        already_added = set()
-
         for entry in selected_entries:
             sk = entry["style_key"]
-            # Couches déjà insérées hors de leur position catalogue → ignorer
-            if sk in already_added:
-                continue
             if sk not in loaded_layers:
                 continue
             layer = loaded_layers[sk]
 
+            # ── Sous-groupes programmatiques ─────────────────────────────────
             if sk == "buildings":
-                # 1. Sous-groupe bâtiments colorés par activité SIRENE
+                # Données statistiques EN PREMIER → juste sous Végétation dans la légende
+                if bati_stats:
+                    bati_data_grp = group.addGroup("Bâti — Données")
+                    for b_layer in bati_stats:
+                        QgsProject.instance().addMapLayer(b_layer, False)
+                        bati_data_grp.addLayer(b_layer)
+                if zone_layers:
+                    zone_grp = group.addGroup("Bâti par zone d'activité")
+                    cat_subgroups = {}
+                    for cat_label, z_layer in zone_layers:
+                        if cat_label not in cat_subgroups:
+                            cat_subgroups[cat_label] = zone_grp.addGroup(cat_label)
+                        QgsProject.instance().addMapLayer(z_layer, False)
+                        cat_subgroups[cat_label].addLayer(z_layer)
                 if activity_layers:
                     sirene_grp = group.addGroup("Bâti par activité SIRENE")
                     for act_layer in activity_layers:
                         QgsProject.instance().addMapLayer(act_layer, False)
                         sirene_grp.addLayer(act_layer)
-                # 2. Sous-groupe bâtiments colorés par zone d'activité
-                if zone_layers:
-                    zone_grp = group.addGroup("Bâti par zone d'activité")
-                    for z_layer in zone_layers:
-                        QgsProject.instance().addMapLayer(z_layer, False)
-                        zone_grp.addLayer(z_layer)
-                # 3. Couche ZAI base (entre les sous-groupes et le bâti gris)
-                if "zai" in loaded_layers:
-                    zl = loaded_layers["zai"]
-                    self._apply_style(zl, "zai")
-                    QgsProject.instance().addMapLayer(zl, False)
-                    group.addLayer(zl)
-                    already_added.add("zai")
+                if bati_layers:
+                    bati_grp = group.addGroup("Bâti intrinsèque")
+                    for b_layer in bati_layers:
+                        QgsProject.instance().addMapLayer(b_layer, False)
+                        bati_grp.addLayer(b_layer)
 
-            if sk == "sirene":
-                # Rendu règle-par-règle NAF — non remplacé par le dialogue
-                self._apply_style(layer, "sirene")
+            if sk == "zai" and outdoor_layers:
+                outdoor_grp = group.addGroup("Espaces publics extérieurs")
+                for o_layer in outdoor_layers:
+                    QgsProject.instance().addMapLayer(o_layer, False)
+                    outdoor_grp.addLayer(o_layer)
+
+            if sk == "equipement_de_transport" and transport_layers:
+                grp = group.addGroup("Équipements de transport")
+                for t_layer in transport_layers:
+                    QgsProject.instance().addMapLayer(t_layer, False)
+                    grp.addLayer(t_layer)
+                continue   # sublayers remplacent la couche plate
+
+            # ── Symbologie ───────────────────────────────────────────────────
+            if sk in ("sirene", "zai"):
+                self._apply_style(layer, sk)
+            elif sk == "osm":
+                pass   # QgsRasterLayer — pas de symbologie vectorielle
             elif entry.get("style") is not None:
                 self._apply_custom_style(layer, entry["style"], entry["geom_type"])
             else:
                 self._apply_style(layer, sk)
-            # addMapLayer(layer, False) : ajoute au projet sans le placer à la
-            # racine de l'arbre — on l'insère manuellement dans le groupe.
+
             QgsProject.instance().addMapLayer(layer, False)
             group.addLayer(layer)
 
@@ -428,19 +605,57 @@ class FDPParCommune(QgsProcessingAlgorithm):
         """
         Interroge l'API Géo gouv.fr et renvoie un dict commune, ou None si annulé.
         Le dict contient les clés : 'nom', 'code' (INSEE), 'geometry' (GeoJSON).
+
+        Stratégie multi-passes pour couvrir tous les cas courants :
+          - Nom complet ou partiel (ex. "Neuilly", "Paris 19ème")
+          - Code postal 5 chiffres (ex. "75019") → recherche par codePostal
+          - Code INSEE (ex. "75119", "2A004") → recherche par code
+        Les arrondissements municipaux (Paris, Lyon, Marseille) sont inclus
+        dans toutes les passes via &type=commune-actuelle,arrondissement-municipal.
+        Les résultats sont fusionnés et dédupliqués par code INSEE.
         """
-        url = (
-            "https://geo.api.gouv.fr/communes"
-            f"?nom={requests.utils.quote(nom_input)}"
-            "&fields=nom,code,contour&format=geojson&geometry=contour"
-        )
-        try:
+        nom_input = nom_input.strip()
+        _FIELDS = "fields=nom,code,contour&format=geojson&geometry=contour"
+        _TYPES  = "type=commune-actuelle,arrondissement-municipal"
+        _BASE   = "https://geo.api.gouv.fr/communes"
+
+        def _fetch(url):
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
+            return resp.json().get("features", [])
+
+        features   = []
+        seen_codes = set()
+
+        def _merge(new_feats):
+            for feat in new_feats:
+                code = feat["properties"].get("code", "")
+                if code and code not in seen_codes:
+                    seen_codes.add(code)
+                    features.append(feat)
+
+        try:
+            # Passe 1 — recherche par nom (toujours)
+            _merge(_fetch(
+                f"{_BASE}?nom={requests.utils.quote(nom_input)}&{_FIELDS}&{_TYPES}"
+            ))
+
+            # Passe 2 — si l'entrée ressemble à un code postal (5 chiffres)
+            if nom_input.isdigit() and len(nom_input) == 5:
+                _merge(_fetch(
+                    f"{_BASE}?codePostal={nom_input}&{_FIELDS}&{_TYPES}"
+                ))
+
+            # Passe 3 — si l'entrée ressemble à un code INSEE (4–5 chars alphanum)
+            # Couvre les codes normaux (ex. "75119"), la Corse ("2A004"), les DOM ("97209")
+            if 4 <= len(nom_input) <= 5 and nom_input.replace("-", "").isalnum():
+                _merge(_fetch(
+                    f"{_BASE}?code={requests.utils.quote(nom_input.upper())}&{_FIELDS}&{_TYPES}"
+                ))
+
         except requests.RequestException as e:
             raise Exception(f"Impossible de contacter l'API Géo : {e}")
 
-        features = resp.json().get("features", [])
         if not features:
             raise Exception(f"Aucune commune trouvée pour « {nom_input} ».")
 

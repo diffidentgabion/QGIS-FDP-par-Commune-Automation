@@ -57,6 +57,33 @@ _PREFER_NAT = {
 }
 
 # =============================================================================
+# Espaces publics extérieurs — ZAI à afficher comme zones, pas comme bâtiments
+# =============================================================================
+# Ces natures désignent des espaces ouverts (parcs, places, promenades…) qui ne
+# contiennent pas de bâtiments au sens propre. Ils sont exclus de l'attribution
+# de bâtiments dans build_zone_activity_layers et rendus directement comme
+# polygones ZAI dans build_outdoor_space_layers.
+# Ordre : végétal d'abord (vert), puis minéral/civique (beige/gris), puis générique.
+
+_OUTDOOR_PUBLIC_COLORS = {
+    # ── Espaces végétalisés ───────────────────────────────────────────────────
+    "Parc":             "#52B788",   # vert forêt — parc urbain ou naturel
+    "Jardin public":    "#74C69D",   # vert moyen — jardin aménagé
+    "Jardins familiaux":"#95D5B2",   # vert clair — jardins partagés/ouvriers
+    "Square":           "#B7E4C7",   # vert très clair — petit square planté
+    "Promenade":        "#D8F3DC",   # vert pâle — allée arborée
+    # ── Espaces minéraux / civiques ───────────────────────────────────────────
+    "Place":            "#C9B99A",   # beige pierre — place dallée
+    "Parvis":           "#D4C9B0",   # beige clair — parvis d'édifice
+    "Esplanade":        "#BFB8A4",   # gris pierre — esplanade dégagée
+    "Terrasse":         "#D4B896",   # ocre chaud — terrasse minérale
+    # ── Générique ─────────────────────────────────────────────────────────────
+    "Espace public":    "#ADADAD",   # gris neutre — espace non qualifié
+}
+
+_OUTDOOR_PUBLIC = set(_OUTDOOR_PUBLIC_COLORS)
+
+# =============================================================================
 # Constantes publiques
 # =============================================================================
 # Valeurs validées sur un échantillon de 3 000 entités WFS Géoplateforme.
@@ -176,18 +203,8 @@ ZAI_CATEGORIES = [
         "label": "Culture & loisirs",
         "base_color": "#118AB2",
         "zone_color": "#B3DFF0",
-        # Ordre : espace public → loisirs → patrimoine/culture
+        # Ordre : loisirs simples → patrimoine/culture → grandes salles/parcs
         "natures_ordered": [
-            "Jardins familiaux",
-            "Square",
-            "Place",
-            "Parvis",
-            "Esplanade",
-            "Jardin public",
-            "Promenade",
-            "Terrasse",
-            "Espace public",
-            "Parc",
             "Moulin à vent",
             "Statue",
             "Monument aux morts",
@@ -371,6 +388,10 @@ def build_zone_activity_layers(
         if not categorie or not label:
             continue
 
+        # Espaces publics extérieurs → rendus directement comme zones, pas attribués aux bâtiments
+        if label in _OUTDOOR_PUBLIC:
+            continue
+
         zai_geom = zai_feat.geometry()
         if not zai_geom or zai_geom.isEmpty():
             continue
@@ -459,5 +480,71 @@ def build_zone_activity_layers(
 
             # Tuple (category_label, layer) pour que l'appelant crée les sous-groupes
             results.append((cat["label"], mem_layer))
+
+    return results
+
+
+# =============================================================================
+# Espaces publics extérieurs
+# =============================================================================
+
+
+def build_outdoor_space_layers(zai_layer: QgsVectorLayer, feedback) -> list:
+    """
+    Retourne une couche mémoire colorée par label pour chaque espace public
+    extérieur trouvé dans zai_layer (Parc, Place, Square…).
+
+    Chaque ZAI dont le label (natd || nat) est dans _OUTDOOR_PUBLIC est rendu
+    directement comme polygone de zone — aucun appariement bâtiment n'est
+    effectué ici.
+
+    Retourne list[QgsVectorLayer] ordonné par l'ordre de _OUTDOOR_PUBLIC_COLORS
+    (végétal d'abord, puis minéral/civique, puis générique).
+    Les labels sans entité sont omis.
+    """
+    crs_id = zai_layer.crs().authid()
+    fields = zai_layer.fields()
+
+    # Grouper les features par label outdoor
+    label_feats: dict = {label: [] for label in _OUTDOOR_PUBLIC_COLORS}
+
+    for processed, feat in enumerate(zai_layer.getFeatures()):
+        if processed % 200 == 0 and feedback.isCanceled():
+            return []
+
+        if _field_str(feat["fictif"]) == "Vrai":
+            continue
+
+        nat_str  = _field_str(feat["nature"])
+        natd_str = _field_str(feat["nature_detaillee"])
+        label = natd_str if (natd_str and natd_str not in _PREFER_NAT) else nat_str
+
+        if label in label_feats:
+            label_feats[label].append(feat)
+
+    results = []
+    for label, color_hex in _OUTDOOR_PUBLIC_COLORS.items():
+        feats = label_feats[label]
+        if not feats:
+            continue
+
+        mem_layer = QgsVectorLayer(
+            f"Polygon?crs={crs_id}",
+            label,
+            "memory",
+        )
+        pr = mem_layer.dataProvider()
+        pr.addAttributes(fields.toList())
+        mem_layer.updateFields()
+        pr.addFeatures(feats)
+        mem_layer.updateExtents()
+
+        c   = QColor(color_hex)
+        sym = QgsFillSymbol.createSimple({
+            "color":         f"{c.red()},{c.green()},{c.blue()},200",
+            "outline_style": "no",
+        })
+        mem_layer.setRenderer(QgsSingleSymbolRenderer(sym))
+        results.append(mem_layer)
 
     return results

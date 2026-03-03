@@ -120,7 +120,7 @@ def build_bati_layers(buildings_layer, feedback) -> list:
     # ── Boucle principale ─────────────────────────────────────────────────────
     for processed, feat in enumerate(buildings_layer.getFeatures()):
         if processed % 500 == 0 and feedback.isCanceled():
-            return []
+            return [], []
 
         n_logements = _field_int(feat["nombre_de_logements"])
         usage_str   = _field_str(feat["usage_1"]).lower()
@@ -138,6 +138,11 @@ def build_bati_layers(buildings_layer, feedback) -> list:
             buckets["residentiel"].append(feat)
             density = n_logements / max(n_etages, 1)
             density_data.append((feat, density))
+
+        elif usage_str == "résidentiel":
+            # usage_1 désigne explicitement le bâtiment comme résidentiel mais
+            # nombre_de_logements est absent — on l'inclut sans données de densité.
+            buckets["residentiel"].append(feat)
 
         elif nature_str in _RELIGIEUX_NATURES:
             buckets["religieux"].append(feat)
@@ -157,16 +162,16 @@ def build_bati_layers(buildings_layer, feedback) -> list:
         else:
             buckets["non_classe"].append(feat)
 
-    results: list = []
-
-    # ── Couches statistiques (placées en tête — haut du sous-groupe) ──────────
+    # ── Couches statistiques ──────────────────────────────────────────────────
+    # Retournées séparément pour être placées dans un groupe dédié par l'appelant.
+    stats_layers: list = []
     if density_data:
-        results.append(_make_density_layer(crs_id, fields, density_data))
-
+        stats_layers.append(_make_density_layer(crs_id, fields, density_data))
     if height_data:
-        results.append(_make_height_layer(crs_id, fields, height_data))
+        stats_layers.append(_make_height_layer(crs_id, fields, height_data))
 
     # ── Couches de classification ─────────────────────────────────────────────
+    classif_layers: list = []
     _BUCKET_SPECS = [
         ("residentiel", "Bâti — Résidentiel", "#C0C0C0"),
         ("religieux",   "Bâti — Religieux",   "#9B72AA"),
@@ -174,14 +179,13 @@ def build_bati_layers(buildings_layer, feedback) -> list:
         ("industriel",  "Bâti — Industriel",   "#8B5E3C"),
         ("non_classe",  "Bâti — Non classé",   "#AAAAAA"),
     ]
-
     for bucket_key, layer_name, color_hex in _BUCKET_SPECS:
         feats = buckets[bucket_key]
         if not feats:
             continue
-        results.append(_make_flat_layer(crs_id, fields, feats, layer_name, color_hex))
+        classif_layers.append(_make_flat_layer(crs_id, fields, feats, layer_name, color_hex))
 
-    return results
+    return stats_layers, classif_layers
 
 
 # =============================================================================
@@ -206,8 +210,10 @@ def _make_density_layer(crs_id, fields, density_data):
     """
     Couche de densité résidentielle : logements / max(étages, 1).
 
-    7 classes EqualInterval de 0 à max_density.
-    Dégradé rouge : lightest (faible densité) → darkest (forte densité).
+    7 classes à coupures quantiles (distribution souvent très asymétrique :
+    la plupart des bâtiments ont une densité faible). Les couleurs suivent
+    la palette ColorBrewer YlOrRd-7, du jaune pâle (faible densité) au rouge
+    foncé (forte densité) — lisibles à l'œil nu.
 
     Séquence correcte pour QgsGraduatedSymbolRenderer sur couche mémoire :
       ① addAttributes + updateFields   — le champ doit exister avant les features
@@ -218,21 +224,26 @@ def _make_density_layer(crs_id, fields, density_data):
     field_name = "densite_log"
     n_classes  = 7
 
+    # Palette YlOrRd ColorBrewer 7 classes — contraste élevé, discriminant à l'œil
+    _DENSITY_PALETTE = [
+        QColor("#FFFFB2"), QColor("#FED976"), QColor("#FEB24C"), QColor("#FD8D3C"),
+        QColor("#FC4E2A"), QColor("#E31A1C"), QColor("#800026"),
+    ]
+
     lyr = QgsVectorLayer(f"Polygon?crs={crs_id}", name, "memory")
     pr  = lyr.dataProvider()
 
-    # ① Schéma : champs originaux + champ calculé
+    # ①
     pr.addAttributes(fields.toList() + [QgsField(field_name, QVariant.Double)])
     lyr.updateFields()
 
     lyr_fields = lyr.fields()
 
-    # ② Construire les features avec l'attribut densite_log
-    max_density = 0.0
-    new_feats   = []
+    # ②  Collecte des valeurs pour calculer les coupures quantiles
+    new_feats = []
+    values    = []
     for orig_feat, density in density_data:
-        if density > max_density:
-            max_density = density
+        values.append(density)
         nf = QgsFeature(lyr_fields)
         nf.setGeometry(orig_feat.geometry())
         nf.setAttributes(list(orig_feat.attributes()) + [density])
@@ -241,19 +252,23 @@ def _make_density_layer(crs_id, fields, density_data):
     pr.addFeatures(new_feats)
     lyr.updateExtents()
 
-    # ③ Graduated renderer — ranges construits explicitement (pas d'expression)
-    colors = generate_gradient("#FF0000", n_classes)
-    step   = max_density / n_classes if max_density > 0 else 1.0
+    # ③ Coupures quantiles — chaque classe contient environ le même nombre
+    #    de bâtiments, ce qui garantit que toutes les couleurs sont visibles.
+    values.sort()
+    n = len(values)
+    breaks = [values[min(int(i * n / n_classes), n - 1)] for i in range(n_classes)]
+    breaks.append(values[-1])   # borne supérieure inclusive
+
     ranges = []
     for i in range(n_classes):
-        lower = i * step
-        upper = (i + 1) * step
-        c     = colors[i]
+        lower = breaks[i]
+        upper = breaks[i + 1]
+        c     = _DENSITY_PALETTE[i]
         sym   = QgsFillSymbol.createSimple({
-            "color":         f"{c.red()},{c.green()},{c.blue()},{c.alpha()}",
+            "color":         f"{c.red()},{c.green()},{c.blue()},255",
             "outline_style": "no",
         })
-        ranges.append(QgsRendererRange(lower, upper, sym, f"{lower:.2f} – {upper:.2f}"))
+        ranges.append(QgsRendererRange(lower, upper, sym, f"{lower:.1f} – {upper:.1f}"))
 
     lyr.setRenderer(QgsGraduatedSymbolRenderer(field_name, ranges))
     return lyr
@@ -301,16 +316,20 @@ def _make_height_layer(crs_id, fields, height_data):
 
     # ③ Une classe par niveau (ranges [0.5,1.5], [1.5,2.5] …) — chaque entier
     #    tombe au centre de sa plage, sans ambiguïté de frontière.
+    #    Interpolation linéaire #C0C0C0 (1 étage, visible) → #303030 (≥ 20 étages).
+    #    generate_gradient part de v=1.0 (blanc) ce qui rend les 1-étage invisibles ;
+    #    on calcule donc les couleurs directement.
     n_classes = max(max_floors_cap, 1)
-    colors    = generate_gradient("#C0C0C0", n_classes)
     ranges    = []
     for i in range(n_classes):
         floor_val = i + 1
+        t         = i / max(n_classes - 1, 1)   # 0.0 (1 floor) → 1.0 (max floor)
+        v         = int(192 - t * 144)           # 192 (#C0) → 48 (#30)
+        c         = QColor(v, v, v, 255)
         lower     = float(floor_val) - 0.5
         upper     = float(floor_val) + 0.5
-        c         = colors[i]
         sym       = QgsFillSymbol.createSimple({
-            "color":         f"{c.red()},{c.green()},{c.blue()},{c.alpha()}",
+            "color":         f"{v},{v},{v},255",
             "outline_style": "no",
         })
         ranges.append(QgsRendererRange(lower, upper, sym, str(floor_val)))
