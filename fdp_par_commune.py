@@ -98,6 +98,15 @@ _bb_spec.loader.exec_module(_bb_mod)
 build_bati_layers = _bb_mod.build_bati_layers
 del _bb_spec, _bb_mod
 
+_sd_spec = importlib.util.spec_from_file_location(
+    "sirene_display",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_display.py"),
+)
+_sd_mod = importlib.util.module_from_spec(_sd_spec)
+_sd_spec.loader.exec_module(_sd_mod)
+build_displaced_sirene_layer = _sd_mod.build_displaced_sirene_layer
+del _sd_spec, _sd_mod
+
 # =============================================================================
 # Catalogue des couches et styles par défaut
 # =============================================================================
@@ -108,6 +117,7 @@ _LAYER_CATALOGUE = [
     # ── Couches par défaut ────────────────────────────────────────────────────
     # Ordre = haut → bas dans la légende (haut = rendu par-dessus)
     {"section": "default",     "typename": None,                                            "display_name": "Établissements SIRENE",       "style_key": "sirene",           "geom_type": "point",   "checked": True},
+    {"section": "default",     "typename": "ADMINEXPRESS-COG-CARTO.LATEST:commune",         "display_name": "Commune (limite)",            "style_key": "commune_boundary", "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:zone_de_vegetation",                  "display_name": "Végétation",                  "style_key": "vegetation",       "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:batiment",                            "display_name": "Bâti",                        "style_key": "buildings",        "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:troncon_de_route",                    "display_name": "Voirie",                      "style_key": "roads",            "geom_type": "line",    "checked": True},
@@ -117,7 +127,6 @@ _LAYER_CATALOGUE = [
     {"section": "default",     "typename": "BDTOPO_V3:aerodrome",                           "display_name": "Aérodrome",                   "style_key": "aerodrome",        "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:surface_hydrographique",              "display_name": "Hydrographie - surface",       "style_key": "water_surface",    "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:cours_d_eau",                         "display_name": "Hydrographie - cours d'eau",  "style_key": "rivers",           "geom_type": "line",    "checked": True},
-    {"section": "default",     "typename": "ADMINEXPRESS-COG-CARTO.LATEST:commune",         "display_name": "Commune (limite)",            "style_key": "commune_boundary", "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:zone_d_activite_ou_d_interet",        "display_name": "Zones d'activité et d'intérêt","style_key": "zai",              "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "display_name": "Parcelles cadastrales",       "style_key": "parcels",          "geom_type": "polygon", "checked": True},
     # ── Couches recommandées ──────────────────────────────────────────────────
@@ -390,6 +399,19 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 loaded_layers["sirene"] = sirene_layer
         feedback.setProgress(80)
 
+        # ── 4a-pré. Déplacement des points SIRENE autour des centroïdes bâtiment ─
+        if (
+            "sirene" in loaded_layers
+            and "buildings" in loaded_layers
+            and not feedback.isCanceled()
+        ):
+            feedback.pushInfo("Calcul des positions SIRENE déplacées…")
+            loaded_layers["sirene"] = build_displaced_sirene_layer(
+                loaded_layers["sirene"],
+                loaded_layers["buildings"],
+                feedback,
+            )
+
         # ── 4a. Filtrage des ZAI fictives ─────────────────────────────────────
         # L'attribut 'fictif' est une chaîne "Vrai"/"Faux" dans BDTOPO WFS.
         # On supprime en place les entités fictives sur la couche mémoire découpée.
@@ -541,12 +563,6 @@ class FDPParCommune(QgsProcessingAlgorithm):
                         QgsProject.instance().addMapLayer(b_layer, False)
                         bati_grp.addLayer(b_layer)
 
-            if sk == "zai" and outdoor_layers:
-                outdoor_grp = group.addGroup("Espaces publics extérieurs")
-                for o_layer in outdoor_layers:
-                    QgsProject.instance().addMapLayer(o_layer, False)
-                    outdoor_grp.addLayer(o_layer)
-
             if sk == "equipement_de_transport" and transport_layers:
                 grp = group.addGroup("Équipements de transport")
                 for t_layer in transport_layers:
@@ -566,6 +582,13 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
             QgsProject.instance().addMapLayer(layer, False)
             group.addLayer(layer)
+
+            # Espaces publics extérieurs ajoutés après la couche ZAI → apparaissent dessous dans la légende
+            if sk == "zai" and outdoor_layers:
+                outdoor_grp = group.addGroup("Espaces publics extérieurs")
+                for o_layer in outdoor_layers:
+                    QgsProject.instance().addMapLayer(o_layer, False)
+                    outdoor_grp.addLayer(o_layer)
 
         feedback.pushInfo(
             f"{len(loaded_layers)} couche(s) chargée(s) dans le groupe « {nom} »."
@@ -1048,15 +1071,11 @@ class FDPParCommune(QgsProcessingAlgorithm):
         plutôt que dans « Santé », car le BPE procède à un reclassement fonctionnel
         que SIRENE n'opère pas.
 
-        Forme du marqueur :
-          circle → activité visible depuis l'espace public (front de rue)
-          square → activité de fond, génératrice d'emploi sans façade publique
+        Chaque catégorie a une forme et une couleur distinctes.
+        Les 8 premières catégories utilisent des formes uniques (fill-based uniquement —
+        les formes stroke-only comme cross/cross2 disparaissent avec outline_style:no).
+        Les 4 suivantes recyclent les premières formes avec des couleurs différentes.
         """
-        # Chaque groupe : (libellé, plages_divisions_NAF, couleur, taille, forme)
-        # Les plages couvrent les divisions NAF rév. 2 (entiers sur 2 chiffres) :
-        #   A:01-03  B:05-09  C:10-33  D:35  E:36-39  F:41-43
-        #   G:45-47  H:49-53  I:55-56  J:58-63  K:64-66  L:68
-        #   M:69-75  N:77-82  O:84  P:85  Q:86-88  R:90-93  S:94-96
         # Tuples : (libellé, plages_NAF, couleur, taille, forme, expr_custom)
         # expr_custom remplace _naf_div_expr(ranges) quand il est non-None.
         # Utilisé pour Éducation (exclusion des codes Formation) et Formation
@@ -1070,9 +1089,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
             # Inclut pharmacies (47.73Z) et opticiens (47.78A) : section G SIRENE
             ("Commerce", [(45, 47)], "#F4A261", 3.0, "circle", None),
             # ── BPE domaines G+I : Restauration & hébergement ─────────────────
-            ("Restauration & hébergement", [(55, 56)], "#E63946", 3.0, "circle", None),
+            ("Restauration & hébergement", [(55, 56)], "#E63946", 3.0, "square", None),
             # ── BPE domaine D : Santé & action sociale ────────────────────────
-            ("Santé & action sociale", [(86, 88)], "#06D6A0", 3.0, "circle", None),
+            ("Santé & action sociale", [(86, 88)], "#06D6A0", 3.0, "diamond", None),
             # ── BPE domaine C (partiel) : Éducation ───────────────────────────
             # Division 85 sauf les codes Formation continue/artistique (85.51Z…)
             (
@@ -1080,7 +1099,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 [(85, 85)],
                 "#FFD166",
                 3.0,
-                "circle",
+                "triangle",
                 f'({_div} = 85) AND "activitePrincipaleEtablissement" NOT IN ({_FORMATION_CODES})',
             ),
             # ── BPE domaine C (partiel) : Formation ───────────────────────────
@@ -1090,37 +1109,39 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 [],
                 "#B8A000",
                 3.0,
-                "circle",
+                "star",
                 f'"activitePrincipaleEtablissement" IN ({_FORMATION_CODES})',
             ),
             # ── BPE domaine H : Services publics & administration ─────────────
             # (La Poste, NAF 53.10Z, est classée ici dans Transport & logistique)
-            ("Équipements & services publics", [(84, 84)], "#C1121F", 3.0, "square", None),
+            ("Équipements & services publics", [(84, 84)], "#C1121F", 3.0, "pentagon", None),
             # ── BPE domaine F : Culture, sport & loisirs ──────────────────────
-            ("Culture, sport & loisirs", [(90, 93)], "#118AB2", 3.0, "circle", None),
+            ("Culture, sport & loisirs", [(90, 93)], "#118AB2", 3.0, "hexagon", None),
             # ── BPE domaine A : Services aux personnes & associations ──────────
             (
                 "Services aux personnes & associations",
                 [(94, 96)],
                 "#F48FB1",
                 2.5,
-                "circle",
+                "cross_fill",
                 None,
             ),
             # ── Hors BPE : Bureaux & services tertiaires ──────────────────────
             # Sections J (info/comm), K (finance), L (immobilier),
             # M (conseil/ingénierie), N (services admin.)
+            # Forme répétée (circle), couleur distincte (violet)
             (
                 "Bureaux & services tertiaires",
                 [(58, 66), (68, 75), (77, 82)],
                 "#7B2D8B",
                 2.5,
-                "square",
+                "circle",
                 None,
             ),
             # ── Hors BPE : Industrie, artisanat & construction ────────────────
             # Sections B (extractif), C (industrie), D (énergie),
             # E (eau/déchets), F (construction)
+            # Forme répétée (square), couleur distincte (brun)
             (
                 "Industrie, artisanat & construction",
                 [(5, 9), (10, 43)],
@@ -1130,9 +1151,11 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 None,
             ),
             # ── Hors BPE : Transport & logistique ────────────────────────────
-            ("Transport & logistique", [(49, 53)], "#6C757D", 2.5, "square", None),
+            # Forme répétée (diamond), couleur distincte (gris)
+            ("Transport & logistique", [(49, 53)], "#6C757D", 2.5, "diamond", None),
             # ── Hors BPE : Agriculture ────────────────────────────────────────
-            ("Agriculture, sylviculture & pêche", [(1, 3)], "#2D6A4F", 2.5, "square", None),
+            # Forme répétée (triangle), couleur distincte (vert foncé)
+            ("Agriculture, sylviculture & pêche", [(1, 3)], "#2D6A4F", 2.5, "triangle", None),
         ]
 
         root_rule = QgsRuleBasedRenderer.Rule(None)

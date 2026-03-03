@@ -88,7 +88,7 @@ _RELIGIEUX_NATURES = {"église", "chapelle"}
 # =============================================================================
 
 
-def build_bati_layers(buildings_layer, feedback) -> list:
+def build_bati_layers(buildings_layer, feedback) -> tuple:
     """
     Classifie le bâti BDTOPO selon ses attributs intrinsèques.
 
@@ -96,9 +96,10 @@ def build_bati_layers(buildings_layer, feedback) -> list:
       - les 5 buckets de classification (règles appliquées dans l'ordre strict) ;
       - les listes pour les deux couches statistiques.
 
-    Retourne list[QgsVectorLayer] :
-      [densité résidentielle, hauteur étages, résidentiel, religieux,
-       château, industriel, non classé] — buckets vides silencieusement omis.
+    Retourne (stats_layers, classif_layers) — deux listes de QgsVectorLayer.
+    stats_layers  : [densité résidentielle, hauteur étages]
+    classif_layers: [résidentiel, religieux, château, industriel, non classé]
+                    — buckets vides silencieusement omis.
     """
     crs_id = buildings_layer.crs().authid()
     fields = buildings_layer.fields()
@@ -120,7 +121,7 @@ def build_bati_layers(buildings_layer, feedback) -> list:
     # ── Boucle principale ─────────────────────────────────────────────────────
     for processed, feat in enumerate(buildings_layer.getFeatures()):
         if processed % 500 == 0 and feedback.isCanceled():
-            return [], []
+            return stats_layers, classif_layers
 
         n_logements = _field_int(feat["nombre_de_logements"])
         usage_str   = _field_str(feat["usage_1"]).lower()
@@ -325,7 +326,6 @@ def _make_height_layer(crs_id, fields, height_data):
         floor_val = i + 1
         t         = i / max(n_classes - 1, 1)   # 0.0 (1 floor) → 1.0 (max floor)
         v         = int(192 - t * 144)           # 192 (#C0) → 48 (#30)
-        c         = QColor(v, v, v, 255)
         lower     = float(floor_val) - 0.5
         upper     = float(floor_val) + 0.5
         sym       = QgsFillSymbol.createSimple({
