@@ -46,19 +46,19 @@ from qgis.core import (
 #   naf_exact_codes       list[str]  codes exacts à matcher avant les plages
 #                                    (ex. Formation correspond à des 85.xx précis)
 SIRENE_CATEGORIES = [
-    {"label": "Commerce",                              "color": "#F4A261", "naf_ranges": [(45, 47)]},
+    {"label": "Commerce",                              "color": "#F07030", "naf_ranges": [(45, 47)]},
     {"label": "Restauration & hébergement",            "color": "#E63946", "naf_ranges": [(55, 56)]},
-    {"label": "Santé & action sociale",                "color": "#06D6A0", "naf_ranges": [(86, 88)]},
+    {"label": "Santé & action sociale",                "color": "#00C896", "naf_ranges": [(86, 88)]},
     {
         "label": "Éducation",
-        "color": "#FFD166",
+        "color": "#F5B800",
         "naf_ranges": [(85, 85)],
         # Exclure les codes Formation qui seraient sinon capturés par div=85
         "naf_exclude_suffixes": ["51Z", "52Z", "53Z", "59A", "59B", "60Z"],
     },
     {
         "label": "Formation",
-        "color": "#B8A000",
+        "color": "#D4A000",
         "naf_ranges": [],
         # Activités de formation continue, artistique, etc. dans la division 85
         "naf_exact_codes": [
@@ -67,13 +67,13 @@ SIRENE_CATEGORIES = [
         ],
     },
     {"label": "Équipements & services publics",        "color": "#C1121F", "naf_ranges": [(84, 84)]},
-    {"label": "Culture, sport & loisirs",              "color": "#118AB2", "naf_ranges": [(90, 93)]},
-    {"label": "Services aux personnes & associations", "color": "#F48FB1", "naf_ranges": [(94, 96)]},
-    {"label": "Bureaux & services tertiaires",         "color": "#7B2D8B", "naf_ranges": [(58, 66), (68, 75), (77, 82)]},
-    {"label": "Industrie, artisanat & construction",   "color": "#8B5E3C", "naf_ranges": [(5, 9), (10, 43)]},
-    {"label": "Transport & logistique",                "color": "#6C757D", "naf_ranges": [(49, 53)]},
-    {"label": "Agriculture, sylviculture & pêche",     "color": "#2D6A4F", "naf_ranges": [(1, 3)]},
-    {"label": "Activité non classée",                  "color": "#BBBBBB", "naf_ranges": []},
+    {"label": "Culture, sport & loisirs",              "color": "#0077C8", "naf_ranges": [(90, 93)]},
+    {"label": "Services aux personnes & associations", "color": "#F0608A", "naf_ranges": [(94, 96)]},
+    {"label": "Bureaux & services tertiaires",         "color": "#8C20C0", "naf_ranges": [(58, 66), (68, 75), (77, 82)]},
+    {"label": "Industrie, artisanat & construction",   "color": "#C06828", "naf_ranges": [(5, 9), (10, 43)]},
+    {"label": "Transport & logistique",                "color": "#4488CC", "naf_ranges": [(49, 53)]},
+    {"label": "Agriculture, sylviculture & pêche",     "color": "#18885A", "naf_ranges": [(1, 3)]},
+    {"label": "Activité non classée",                  "color": "#A8A8BC", "naf_ranges": []},
 ]
 
 _CATCHALL_IDX   = len(SIRENE_CATEGORIES) - 1

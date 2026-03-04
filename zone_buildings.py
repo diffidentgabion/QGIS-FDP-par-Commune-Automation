@@ -67,18 +67,18 @@ _PREFER_NAT = {
 
 _OUTDOOR_PUBLIC_COLORS = {
     # ── Espaces végétalisés ───────────────────────────────────────────────────
-    "Parc":             "#52B788",   # vert forêt — parc urbain ou naturel
-    "Jardin public":    "#74C69D",   # vert moyen — jardin aménagé
-    "Jardins familiaux":"#95D5B2",   # vert clair — jardins partagés/ouvriers
-    "Square":           "#B7E4C7",   # vert très clair — petit square planté
-    "Promenade":        "#D8F3DC",   # vert pâle — allée arborée
+    "Parc":             "#29A86A",   # vert saturé — parc urbain ou naturel
+    "Jardin public":    "#45C484",   # vert vif moyen — jardin aménagé
+    "Jardins familiaux":"#70CC99",   # vert vif clair — jardins partagés/ouvriers
+    "Square":           "#90DCAC",   # vert clair vif — petit square planté
+    "Promenade":        "#B0E8C0",   # vert pâle vif — allée arborée
     # ── Espaces minéraux / civiques ───────────────────────────────────────────
-    "Place":            "#C9B99A",   # beige pierre — place dallée
-    "Parvis":           "#D4C9B0",   # beige clair — parvis d'édifice
-    "Esplanade":        "#BFB8A4",   # gris pierre — esplanade dégagée
-    "Terrasse":         "#D4B896",   # ocre chaud — terrasse minérale
+    "Place":            "#D4903A",   # ambre terracotta — place dallée
+    "Parvis":           "#DDA848",   # ocre doré — parvis d'édifice
+    "Esplanade":        "#C8A040",   # or foncé — esplanade dégagée
+    "Terrasse":         "#E09050",   # terracotta chaud — terrasse minérale
     # ── Générique ─────────────────────────────────────────────────────────────
-    "Espace public":    "#ADADAD",   # gris neutre — espace non qualifié
+    "Espace public":    "#9898B8",   # bleu-gris — espace non qualifié
 }
 
 _OUTDOOR_PUBLIC = set(_OUTDOOR_PUBLIC_COLORS)
@@ -94,8 +94,8 @@ ZAI_CATEGORIES = [
     {
         "categorie": "Science et enseignement",
         "label": "Éducation",
-        "base_color": "#FFD166",
-        "zone_color": "#FFF0B3",
+        "base_color": "#F5B800",
+        "zone_color": "#FFE566",
         # Ordre : maternelle → primaire → secondaire → lycée → supérieur → recherche
         "natures_ordered": [
             "Ecole maternelle",
@@ -123,8 +123,8 @@ ZAI_CATEGORIES = [
     {
         "categorie": "Santé",
         "label": "Santé",
-        "base_color": "#06D6A0",
-        "zone_color": "#B3F5E6",
+        "base_color": "#00C896",
+        "zone_color": "#80EDD4",
         # Ordre : soins légers/long séjour → hospitalisation aiguë
         "natures_ordered": [
             "Maison de retraite",
@@ -178,8 +178,8 @@ ZAI_CATEGORIES = [
     {
         "categorie": "Industriel et commercial",
         "label": "Industriel & commercial",
-        "base_color": "#8B5E3C",
-        "zone_color": "#E8D5C4",
+        "base_color": "#C06828",
+        "zone_color": "#F0B880",
         # Ordre : commerce de détail → industrie → zones
         "natures_ordered": [
             "Centre commercial",
@@ -201,8 +201,8 @@ ZAI_CATEGORIES = [
     {
         "categorie": "Culture et loisirs",
         "label": "Culture & loisirs",
-        "base_color": "#118AB2",
-        "zone_color": "#B3DFF0",
+        "base_color": "#0077C8",
+        "zone_color": "#70C4F0",
         # Ordre : loisirs simples → patrimoine/culture → grandes salles/parcs
         "natures_ordered": [
             "Moulin à vent",
@@ -233,8 +233,8 @@ ZAI_CATEGORIES = [
     {
         "categorie": "Sport",
         "label": "Sport",
-        "base_color": "#F4A261",
-        "zone_color": "#FCDEC4",
+        "base_color": "#FDB97A",
+        "zone_color": "#FDB97A",
         # Ordre : équipements simples → grands complexes
         "natures_ordered": [
             "Terrain de sport",
@@ -256,8 +256,8 @@ ZAI_CATEGORIES = [
     {
         "categorie": "Religieux",
         "label": "Religieux",
-        "base_color": "#9B72AA",
-        "zone_color": "#E0D0E8",
+        "base_color": "#8B50D0",
+        "zone_color": "#C8A0E8",
         # Ordre : funéraire/petit → édifices cultuels → grandes cathédrales
         "natures_ordered": [
             "Tombe",
@@ -289,8 +289,8 @@ ZAI_CATEGORIES = [
     {
         "categorie": "Gestion des eaux",
         "label": "Gestion des eaux",
-        "base_color": "#6baed6",
-        "zone_color": "#C4E3F5",
+        "base_color": "#3A9BD5",
+        "zone_color": "#8CCFEE",
         "natures_ordered": [
             "Station de pompage",
             "Station d'épuration",
@@ -307,11 +307,11 @@ ZAI_CATEGORIES = [
 
 def generate_gradient(base_color_hex: str, n_steps: int) -> list:
     """
-    Retourne n_steps QColor assombrissant progressivement base_color_hex.
+    Retourne n_steps QColor allant du pastel désaturé à la teinte vive saturée.
 
-    La valeur HSV (v) descend de 1.0 (le plus clair, index 0) à 0.45
-    (le plus sombre, index -1) en n_steps incréments égaux.
-    Teinte et saturation sont préservées.
+    La saturation monte de 20 % à 100 % de la saturation de base_color_hex ;
+    la valeur (luminosité) ne baisse que légèrement (100 % → 90 %) pour éviter
+    l'aspect «trop sombre» d'un dégradé purement obscurcissant.
 
     Si n_steps <= 1, retourne une liste d'un seul QColor à base_color_hex.
     """
@@ -324,8 +324,10 @@ def generate_gradient(base_color_hex: str, n_steps: int) -> list:
 
     result = []
     for i in range(n_steps):
-        v = 1.0 - (i / (n_steps - 1)) * 0.55
-        result.append(QColor.fromHsvF(max(h, 0.0), s, v))
+        t = i / (n_steps - 1)
+        s_i = s * (0.20 + 0.80 * t)   # 20 % → 100 % de la saturation de base
+        v_i = 1.0 - t * 0.10          # 100 % → 90 % (léger assombrissement)
+        result.append(QColor.fromHsvF(max(h, 0.0), min(s_i, 1.0), v_i))
     return result
 
 

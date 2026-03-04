@@ -30,10 +30,12 @@ from qgis.core import (
     QgsMarkerSymbol,
     QgsPointXY,
     QgsProcessingAlgorithm,
+    QgsProcessingContext,
     QgsProcessingParameterString,
     QgsProject,
     QgsRasterLayer,
     QgsRuleBasedRenderer,
+    QgsSimpleLineSymbolLayer,
     QgsSingleSymbolRenderer,
     QgsVectorLayer,
 )
@@ -127,27 +129,55 @@ _LAYER_CATALOGUE = [
     {"section": "default",     "typename": "BDTOPO_V3:aerodrome",                           "display_name": "Aérodrome",                   "style_key": "aerodrome",        "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:surface_hydrographique",              "display_name": "Hydrographie - surface",       "style_key": "water_surface",    "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:cours_d_eau",                         "display_name": "Hydrographie - cours d'eau",  "style_key": "rivers",           "geom_type": "line",    "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:reservoir",                           "display_name": "Réservoir",                   "style_key": "reservoir",        "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": "BDTOPO_V3:zone_d_activite_ou_d_interet",        "display_name": "Zones d'activité et d'intérêt","style_key": "zai",              "geom_type": "polygon", "checked": True},
-    {"section": "default",     "typename": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "display_name": "Parcelles cadastrales",       "style_key": "parcels",          "geom_type": "polygon", "checked": True},
-    # ── Couches recommandées ──────────────────────────────────────────────────
-    {"section": "recommended", "typename": "BDTOPO_V3:erp",                            "display_name": "ERP",                          "style_key": "erp",                      "geom_type": "polygon", "checked": False},
-    {"section": "recommended", "typename": "BDTOPO_V3:construction_surfacique",        "display_name": "Constructions surfaciques",     "style_key": "construction_surfacique",  "geom_type": "polygon", "checked": False},
-    {"section": "recommended", "typename": "BDTOPO_V3:itineraire_autre",               "display_name": "Itinéraires (vélo, pédestre)", "style_key": "itineraire_autre",         "geom_type": "line",    "checked": False},
-    {"section": "recommended", "typename": "BDTOPO_V3:haie",                           "display_name": "Haies",                        "style_key": "haie",                     "geom_type": "line",    "checked": False},
-    {"section": "recommended", "typename": "BDTOPO_V3:cimetiere",                      "display_name": "Cimetières",                   "style_key": "cimetiere",                "geom_type": "polygon", "checked": False},
-    {"section": "recommended", "typename": "BDTOPO_V3:detail_hydrographique",          "display_name": "Détails hydrographiques",      "style_key": "detail_hydrographique",    "geom_type": "point",   "checked": False},
-    {"section": "recommended", "typename": "BDTOPO_V3:foret_publique",                 "display_name": "Forêts publiques",             "style_key": "foret_publique",           "geom_type": "polygon", "checked": False},
-    # ── Couches avancées ──────────────────────────────────────────────────────
-    {"section": "advanced",    "typename": "BDTOPO_V3:canalisation",                   "display_name": "Canalisation",                 "style_key": "canalisation",             "geom_type": "line",    "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:construction_lineaire",          "display_name": "Construction linéaire",        "style_key": "construction_lineaire",    "geom_type": "line",    "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:construction_ponctuelle",        "display_name": "Construction ponctuelle",      "style_key": "construction_ponctuelle",  "geom_type": "point",   "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:detail_orographique",            "display_name": "Détail orographique",          "style_key": "detail_orographique",      "geom_type": "point",   "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:lieu_dit_non_habite",            "display_name": "Lieu-dit non habité",          "style_key": "lieu_dit_non_habite",      "geom_type": "point",   "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:point_de_repere",                "display_name": "Point de repère",              "style_key": "point_de_repere",          "geom_type": "point",   "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:pylone",                         "display_name": "Pylône",                       "style_key": "pylone",                   "geom_type": "point",   "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:reservoir",                      "display_name": "Réservoir",                    "style_key": "reservoir",                "geom_type": "polygon", "checked": False},
-    {"section": "advanced",    "typename": "BDTOPO_V3:terrain_de_sport",               "display_name": "Terrain de sport",             "style_key": "terrain_de_sport",         "geom_type": "polygon", "checked": False},
+    {"section": "default",     "typename": "BDTOPO_V3:terrain_de_sport",                    "display_name": "Terrain de sport",             "style_key": "terrain_de_sport",         "geom_type": "polygon", "checked": True},
+    {"section": "default",     "typename": "BDTOPO_V3:cimetiere",                           "display_name": "Cimetières",                   "style_key": "cimetiere",                "geom_type": "polygon", "checked": True},
+    # ── Couches rurales RPG (désactivées par défaut) ──────────────────────────
+    # Typenames vérifiés sur GetCapabilities data.geopf.fr — 2025-03-04.
+    # RPG.LATEST:parcelles_graphiques et RPG.LATEST:ilots_anonymes ont un alias
+    # LATEST stable. Les quatre suivantes sont épinglées à 2024 — mettre à jour
+    # pour l'édition 2025 lorsque la Géoplateforme publie les nouvelles couches.
+    # Haie en premier : ajouté en tête du groupe Agriculture dans la légende.
+    {"section": "rural",  "typename": "BDTOPO_V3:haie",
+     "display_name": "Haies",                        "style_key": "haie",
+     "geom_type": "line",    "checked": False},
+    {"section": "rural", "typename": "RPG.LATEST:parcelles_graphiques",
+     "display_name": "Parcelles agricoles",          "style_key": "rpg_parcelles",
+     "geom_type": "polygon", "checked": False},
+    {"section": "rural", "typename": "RPG.LATEST:ilots_anonymes",
+     "display_name": "Îlots",                        "style_key": "rpg_ilots",
+     "geom_type": "polygon", "checked": False},
+    {"section": "rural",  # ⚠ 2024-pinned
+     "typename": "IGNF_RPG_PARCELLES-AGRICOLES-CATEGORISEES_2024:parcelles_agricole_categorisees_2024",
+     "display_name": "Catégories PAC",               "style_key": "rpg_pac",
+     "geom_type": "polygon", "checked": False},
+    {"section": "rural",  # ⚠ 2024-pinned
+     "typename": "IGNF_RPG_PRAIRIES-PERMANENTES_2024:prairies_permanentes_2024",
+     "display_name": "Prairies permanentes",         "style_key": "rpg_pp",
+     "geom_type": "polygon", "checked": False},
+    {"section": "rural",  # ⚠ 2024-pinned (local name contient l'année)
+     "typename": "IGNF_RPG_PARCELLES-ELIGIBLES-IAE:parcelles_eligibles_iae_2024",
+     "display_name": "Infra. agro-env.",             "style_key": "rpg_iae",
+     "geom_type": "polygon", "checked": False},
+    {"section": "rural",  # ⚠ 2024-pinned (local name contient la date de génération)
+     "typename": "IGNF_RPG_ZONES-DENSITE-HOMOGENE_2024:surfaces_2024_zdh_20250621",
+     "display_name": "Zones densité homogène",       "style_key": "rpg_zdh",
+     "geom_type": "polygon", "checked": False},
+    # ── Couches supplémentaires ───────────────────────────────────────────────
+    {"section": "extra",       "typename": "BDTOPO_V3:erp",                            "display_name": "ERP",                          "style_key": "erp",                      "geom_type": "point",   "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:construction_surfacique",        "display_name": "Constructions surfaciques",     "style_key": "construction_surfacique",  "geom_type": "polygon", "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:itineraire_autre",               "display_name": "Itinéraires (vélo, pédestre)", "style_key": "itineraire_autre",         "geom_type": "line",    "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:detail_hydrographique",          "display_name": "Détails hydrographiques",      "style_key": "detail_hydrographique",    "geom_type": "point",   "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:foret_publique",                 "display_name": "Forêts publiques",             "style_key": "foret_publique",           "geom_type": "polygon", "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:canalisation",                   "display_name": "Canalisation",                 "style_key": "canalisation",             "geom_type": "line",    "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:construction_lineaire",          "display_name": "Construction linéaire",        "style_key": "construction_lineaire",    "geom_type": "line",    "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:construction_ponctuelle",        "display_name": "Construction ponctuelle",      "style_key": "construction_ponctuelle",  "geom_type": "point",   "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:detail_orographique",            "display_name": "Détail orographique",          "style_key": "detail_orographique",      "geom_type": "point",   "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:lieu_dit_non_habite",            "display_name": "Lieu-dit non habité",          "style_key": "lieu_dit_non_habite",      "geom_type": "point",   "checked": False},
+    {"section": "extra",       "typename": "BDTOPO_V3:pylone",                         "display_name": "Pylône",                       "style_key": "pylone",                   "geom_type": "point",   "checked": False},
     # ── Fond de référence ─────────────────────────────────────────────────────
+    {"section": "default",     "typename": "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "display_name": "Parcelles cadastrales",       "style_key": "parcels",          "geom_type": "polygon", "checked": True},
     {"section": "default",     "typename": None,                                            "display_name": "OpenStreetMap",               "style_key": "osm",              "geom_type": "raster",  "checked": False},
 ]
 
@@ -157,36 +187,42 @@ _LAYER_CATALOGUE = [
 _DEFAULT_STYLES = {
     # ── Couches par défaut ────────────────────────────────────────────────────
     "sirene":           None,
-    "buildings":        {"geom_type": "polygon", "fill_color": QColor(192, 192, 192, 255), "outline_color": QColor("#aaaaaa"), "outline_width": 0.1, "outline_style": "none"},
-    "roads":            {"geom_type": "line",    "line_color": QColor("#ffffff"),           "line_width": 0.5,  "line_style": "solid"},
-    "railways":         {"geom_type": "line",    "line_color": QColor("#666666"),           "line_width": 0.7,  "line_style": "solid"},
-    "aerodrome":         {"geom_type": "polygon", "fill_color": QColor(210, 210, 200, 180), "outline_color": QColor("#a0a090"), "outline_width": 0.3, "outline_style": "solid"},
-    "piste_d_aerodrome": {"geom_type": "polygon", "fill_color": QColor(130, 130, 120, 220), "outline_color": QColor("#606058"), "outline_width": 0.2, "outline_style": "solid"},
-    "vegetation":       {"geom_type": "polygon", "fill_color": QColor(200, 230, 196, 255),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.1, "outline_style": "none"},
-    "rivers":           {"geom_type": "line",    "line_color": QColor("#6baed6"),           "line_width": 0.8,  "line_style": "solid"},
-    "water_surface":    {"geom_type": "polygon", "fill_color": QColor(170, 211, 223, 255),  "outline_color": QColor("#6baed6"), "outline_width": 0.1, "outline_style": "none"},
+    "buildings":        {"geom_type": "polygon", "fill_color": QColor(162, 160, 178, 255), "outline_color": QColor("#9898aa"), "outline_width": 0.1, "outline_style": "none"},
+    "roads":            None,  # rendu règle-par-règle (QgsRuleBasedRenderer), non éditable ici
+    "railways":         None,  # rendu règle-par-règle (QgsRuleBasedRenderer), non éditable ici
+    "aerodrome":         {"geom_type": "polygon", "fill_color": QColor(200, 205, 185, 255), "outline_color": QColor("#8A9070"), "outline_width": 0.3, "outline_style": "none"},
+    "piste_d_aerodrome": {"geom_type": "polygon", "fill_color": QColor(110, 120, 100, 255), "outline_color": QColor("#505840"), "outline_width": 0.2, "outline_style": "none"},
+    "vegetation":       {"geom_type": "polygon", "fill_color": QColor(155, 215, 155, 255),  "outline_color": QColor("#88bb88"), "outline_width": 0.1, "outline_style": "none"},
+    "rivers":           {"geom_type": "line",    "line_color": QColor("#3A9BD5"),           "line_width": 0.8,  "line_style": "solid"},
+    "water_surface":    {"geom_type": "polygon", "fill_color": QColor(120, 190, 220, 255),  "outline_color": QColor("#3A9BD5"), "outline_width": 0.1, "outline_style": "none"},
     "parcels":          {"geom_type": "polygon", "fill_color": QColor(224, 224, 224, 255),  "outline_color": QColor("#cccccc"), "outline_width": 0.1, "outline_style": "none"},
     "commune_boundary": {"geom_type": "polygon", "fill_color": QColor(0,   0,   0,   0),   "outline_color": QColor("#000000"), "outline_width": 0.5, "outline_style": "solid"},
-    # ── Couches recommandées ──────────────────────────────────────────────────
-    "erp":                    {"geom_type": "polygon", "fill_color": QColor(244, 162,  97, 178), "outline_color": QColor("#e76f51"), "outline_width": 0.3, "outline_style": "solid"},
-    "construction_surfacique":{"geom_type": "polygon", "fill_color": QColor(208, 208, 208, 255), "outline_color": QColor("#aaaaaa"), "outline_width": 0.2, "outline_style": "solid"},
-    "itineraire_autre":       {"geom_type": "line",    "line_color": QColor("#2a9d8f"),           "line_width": 0.8,  "line_style": "dashed"},
-    "haie":                   {"geom_type": "line",    "line_color": QColor("#52b788"),           "line_width": 0.6,  "line_style": "solid"},
-    "cimetiere":              {"geom_type": "polygon", "fill_color": QColor(216, 232, 216, 255),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.3, "outline_style": "solid"},
-    "detail_hydrographique":  {"geom_type": "point",   "marker_color": QColor("#6baed6"),         "marker_size": 2.0},
-    "foret_publique":         {"geom_type": "polygon", "fill_color": QColor(149, 201, 158, 204),  "outline_color": QColor("#52b788"), "outline_width": 0.3, "outline_style": "solid"},
-    # ── Couches avancées ──────────────────────────────────────────────────────
-    "canalisation":            {"geom_type": "line",    "line_color": QColor("#4fc3f7"),           "line_width": 0.5,  "line_style": "solid"},
-    "construction_lineaire":   {"geom_type": "line",    "line_color": QColor("#888888"),           "line_width": 0.5,  "line_style": "solid"},
-    "construction_ponctuelle": {"geom_type": "point",   "marker_color": QColor("#888888"),         "marker_size": 2.0},
-    "detail_orographique":     {"geom_type": "point",   "marker_color": QColor("#b5838d"),         "marker_size": 2.0},
-    "lieu_dit_non_habite":     {"geom_type": "point",   "marker_color": QColor("#555555"),         "marker_size": 2.0},
-    "point_de_repere":         {"geom_type": "point",   "marker_color": QColor("#e63946"),         "marker_size": 2.0},
-    "pylone":                  {"geom_type": "point",   "marker_color": QColor("#aaaaaa"),         "marker_size": 2.0},
-    "reservoir":               {"geom_type": "polygon", "fill_color": QColor(144, 224, 239, 204),  "outline_color": QColor("#6baed6"), "outline_width": 0.3, "outline_style": "solid"},
-    "terrain_de_sport":        {"geom_type": "polygon", "fill_color": QColor(168, 218, 220, 204),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.2, "outline_style": "solid"},
+    "reservoir":        {"geom_type": "polygon", "fill_color": QColor(80,  200, 230, 220),  "outline_color": QColor("#3A9BD5"), "outline_width": 0.3, "outline_style": "solid"},
+    # ── Couches supplémentaires ───────────────────────────────────────────────
+    "erp":                    {"geom_type": "point",   "marker_color": QColor("#e76f51"),         "marker_size": 2.5},
+    "construction_surfacique": None,   # rendu par sublayers via build_construction_surfacique_layers
+    "itineraire_autre":       {"geom_type": "line",    "line_color": QColor("#15A87C"),           "line_width": 0.4,  "line_style": "solid"},
+    "haie":                   {"geom_type": "line",    "line_color": QColor("#29A86A"),           "line_width": 0.6,  "line_style": "solid"},
+    "cimetiere":              {"geom_type": "polygon", "fill_color": QColor(185, 170, 148, 255),  "outline_color": QColor("#9a8a78"), "outline_width": 0.3, "outline_style": "none"},
+    "detail_hydrographique":  {"geom_type": "point",   "marker_color": QColor("#3A9BD5"),         "marker_size": 2.0},
+    "foret_publique":         {"geom_type": "polygon", "fill_color": QColor(100, 180, 120, 220),  "outline_color": QColor("#2E8B57"), "outline_width": 0.3, "outline_style": "solid"},
+    # ── Couches supplémentaires avancées ──────────────────────────────────────
+    "canalisation":            {"geom_type": "line",    "line_color": QColor("#29ABE2"),           "line_width": 0.5,  "line_style": "solid"},
+    "construction_lineaire":   {"geom_type": "line",    "line_color": QColor("#7878A0"),           "line_width": 0.5,  "line_style": "solid"},
+    "construction_ponctuelle": {"geom_type": "point",   "marker_color": QColor("#7878A0"),         "marker_size": 2.0},
+    "detail_orographique":     {"geom_type": "point",   "marker_color": QColor("#C24C6A"),         "marker_size": 2.0},
+    "lieu_dit_non_habite":     {"geom_type": "point",   "marker_color": QColor("#555588"),         "marker_size": 2.0},
+    "pylone":                  {"geom_type": "point",   "marker_color": QColor("#8888AA"),         "marker_size": 2.0},
+    "terrain_de_sport":        {"geom_type": "polygon", "fill_color": QColor(253, 185, 122, 255),  "outline_color": QColor("#aaaaaa"), "outline_width": 0.2, "outline_style": "none"},
     "zai":                     None,   # rendu règle-par-règle via _apply_zai_style, non éditable dans le dialogue
     "equipement_de_transport": None,   # rendu par sublayers via build_transport_layers, non éditable dans le dialogue
+    # ── Couches rurales RPG ───────────────────────────────────────────────────
+    "rpg_parcelles": None,   # rendu règle-par-règle via _apply_rpg_parcelles_style
+    "rpg_ilots":     None,   # rendu symbole unique via _apply_rpg_ilots_style
+    "rpg_pac":       None,   # rendu règle-par-règle via _apply_rpg_pac_style
+    "rpg_pp":        None,   # rendu symbole unique via _apply_rpg_pp_style
+    "rpg_iae":       None,   # rendu règle-par-règle via _apply_rpg_iae_style
+    "rpg_zdh":       None,   # rendu règle-par-règle via _apply_rpg_zdh_style
 }
 
 
@@ -196,12 +232,12 @@ _DEFAULT_STYLES = {
 # Valeurs observées sur le WFS Géoplateforme (échantillon 500 entités, 184 707 total).
 
 _TRANSPORT_COLORS = {
-    # ── Routes & intersections (bleu-gris — neutre mais caractère) ────────────
-    "Péage":                      "#B0BEC5",   # bleu-gris clair — péage visible
-    "Carrefour":                  "#90A4AE",   # bleu-gris moyen-clair
-    "Rond-point":                 "#607D8B",   # bleu-gris moyen
-    "Echangeur partiel":          "#546E7A",   # bleu-gris moyen-foncé
-    "Echangeur":                  "#37474F",   # bleu-gris foncé
+    # ── Routes & intersections (bleu-ardoise vif) ────────────────────────────
+    "Péage":                      "#90B8D8",   # bleu clair — péage visible
+    "Carrefour":                  "#6090C0",   # bleu moyen-clair
+    "Rond-point":                 "#3870A8",   # bleu moyen
+    "Echangeur partiel":          "#2058A0",   # bleu moyen-foncé
+    "Echangeur":                  "#103878",   # bleu foncé
     # ── Ferroviaire & urbain (rouges/oranges + violet pour transit urbain) ────
     "Station de tramway":         "#AB47BC",   # violet moyen — tramway
     "Station de métro":           "#7B1FA2",   # violet foncé — métro
@@ -278,6 +314,90 @@ def build_transport_layers(equip_layer, feedback) -> list:
 
 
 # =============================================================================
+# Constructions surfaciques — catégorisation par nature
+# =============================================================================
+# Natures routées vers le groupe Équipements de transport (infrastructures de franchissement).
+_PONT_NATURES = {"Pont", "Viaduc", "Ponceau"}
+
+_CONSTRUCTION_SURFACIQUE_COLORS = {
+    # ── Franchissements (→ groupe transport) ─────────────────────────────────
+    "Pont":              "#FFFFFF",   # blanc pur — tablier de pont
+    "Viaduc":            "#E8E0D0",   # beige chaud — viaduc maçonné
+    "Ponceau":           "#F0EEE8",   # blanc cassé — petit franchissement
+    # ── Ouvrages hydrauliques ──────────────────────────────────────────────
+    "Barrage":           "#2E86C1",   # bleu vif — retenue d'eau
+    "Digue":             "#C4A35A",   # ocre doré — remblai terreux
+    "Ecluse":            "#14A691",   # sarcelle — navigation fluviale
+    # ── Ouvrages de génie civil ───────────────────────────────────────────
+    "Remblai":           "#BC7A40",   # brun chaud — terrassement
+    "Talus":             "#9A7050",   # brun moyen — pente aménagée
+    "Tunnel":            "#505060",   # anthracite — ouvrage souterrain
+    # ── Éléments bâtis courants ───────────────────────────────────────────
+    "Mur":               "#909090",   # gris moyen — mur de clôture/soutènement
+    "Escalier":          "#BFB0A0",   # pierre chaude — escalier extérieur
+    "Passage à niveau":  "#F4C430",   # ambre vif — signalement sécurité
+}
+
+
+def build_construction_surfacique_layers(constr_layer, feedback) -> list:
+    """
+    Génère des couches mémoire pour construction_surfacique, séparées par nature.
+
+    Retourne list[QgsVectorLayer] ordonnées par _CONSTRUCTION_SURFACIQUE_COLORS
+    puis alphabétiquement pour les natures inconnues.
+    L'appelant est responsable du routage : les couches dont le nom est dans
+    _PONT_NATURES vont dans le groupe Équipements de transport, les autres
+    dans un groupe Constructions surfaciques.
+    """
+    label_fids = {}
+    for processed, feat in enumerate(constr_layer.getFeatures()):
+        if processed % 500 == 0 and feedback.isCanceled():
+            return []
+        nat_str = (feat["nature"] or "").strip()
+        if nat_str == "NULL":
+            nat_str = ""
+        if not nat_str:
+            continue
+        label_fids.setdefault(nat_str, []).append(feat.id())
+
+    if not label_fids:
+        return []
+
+    crs_id  = constr_layer.crs().authid()
+    fields  = constr_layer.fields()
+    results = []
+
+    known   = [l for l in _CONSTRUCTION_SURFACIQUE_COLORS if l in label_fids]
+    unknown = sorted(l for l in label_fids if l not in _CONSTRUCTION_SURFACIQUE_COLORS)
+
+    for label in known + unknown:
+        fids      = label_fids[label]
+        color_hex = _CONSTRUCTION_SURFACIQUE_COLORS.get(label, "#AAAAAA")
+
+        mem_layer = QgsVectorLayer(f"Polygon?crs={crs_id}", label, "memory")
+        pr = mem_layer.dataProvider()
+        pr.addAttributes(fields.toList())
+        mem_layer.updateFields()
+        pr.addFeatures(list(constr_layer.getFeatures(
+            QgsFeatureRequest().setFilterFids(fids)
+        )))
+        mem_layer.updateExtents()
+
+        c = QColor(color_hex)
+        outline = "no" if label not in _PONT_NATURES else "solid"
+        sym = QgsFillSymbol.createSimple({
+            "color":          f"{c.red()},{c.green()},{c.blue()},{c.alpha()}",
+            "outline_style":  outline,
+            "outline_color":  "#aaaaaa",
+            "outline_width":  "0.3",
+        })
+        mem_layer.setRenderer(QgsSingleSymbolRenderer(sym))
+        results.append(mem_layer)
+
+    return results
+
+
+# =============================================================================
 # Algorithme principal
 # =============================================================================
 
@@ -309,10 +429,11 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
     def shortHelpString(self):
         return (
-            "Génère un fond de plan communal à partir de sources ouvertes :\n"
-            "  • IGN Géoplateforme WFS (ADMIN EXPRESS, Cadastre, BD TOPO)\n"
-            "  • Géo-SIRENE (établissements)\n\n"
-            "Saisissez un nom de commune (recherche partielle acceptée)."
+            "Génère un fond de plan communal vectoriel à partir des données ouvertes :\n"
+            "  • IGN BD TOPO / ADMIN EXPRESS / Cadastre (WFS Géoplateforme)\n"
+            "  • Établissements économiques (Géo-SIRENE)\n\n"
+            "Saisissez le nom de la commune, en entier ou en partie.\n"
+            "Un dialogue permet ensuite de choisir les couches et de les ordonner."
         )
 
     def createInstance(self):
@@ -333,7 +454,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         # ── 1. Recherche et sélection de la commune ──────────────────────────
         nom_input = self.parameterAsString(parameters, self.NOM_COMMUNE, context)
-        feedback.pushInfo(f"Recherche de la commune : {nom_input}…")
+        feedback.pushInfo(f"🔍  Recherche de « {nom_input} »…")
 
         commune = self._search_commune(nom_input)
         if commune is None:
@@ -342,9 +463,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         nom = commune["nom"]
         insee = commune["code"]
         dep = self._get_dep(insee)
-        feedback.pushInfo(
-            f"Commune : {nom}  |  INSEE : {insee}  |  Département : {dep}"
-        )
+        feedback.pushInfo(f"📍  {nom} ({dep}) — INSEE {insee}")
         feedback.setProgress(5)
 
         # ── 2. Géométrie communale reprojetée en EPSG:2154 ───────────────────
@@ -356,7 +475,6 @@ class FDPParCommune(QgsProcessingAlgorithm):
         commune_geom = self._geojson_to_qgsgeometry(commune["geometry"])
         commune_geom.transform(xform)
         bbox = commune_geom.boundingBox()
-        feedback.pushInfo(f"Emprise Lambert 93 : {bbox.toString(0)}")
 
         # Couche limite unique réutilisée pour tous les découpages
         boundary_layer = self._geom_to_temp_layer(commune_geom, "Polygon", crs_2154)
@@ -379,10 +497,11 @@ class FDPParCommune(QgsProcessingAlgorithm):
         total_layers = len(wfs_entries) + (1 if sirene_entry else 0)
         progress_per_layer = 40 / max(total_layers, 1)
 
+        feedback.pushInfo(f"⬇  Téléchargement des couches ({total_layers})…")
         for i, entry in enumerate(wfs_entries):
             if feedback.isCanceled():
                 return {}
-            feedback.pushInfo(f"Chargement : {entry['display_name']}…")
+            feedback.pushInfo(f"   {entry['display_name']}…")
             layer = self._load_wfs_layer(
                 entry["typename"], entry["display_name"],
                 bbox, boundary_layer, crs_2154, feedback,
@@ -393,7 +512,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         # ── 4. Établissements SIRENE ──────────────────────────────────────────
         if sirene_entry and not feedback.isCanceled():
-            feedback.pushInfo("Chargement des établissements SIRENE…")
+            feedback.pushInfo("⬇  Établissements économiques…")
             sirene_layer = self._load_sirene(insee, boundary_layer, crs_2154, feedback)
             if sirene_layer:
                 loaded_layers["sirene"] = sirene_layer
@@ -405,27 +524,12 @@ class FDPParCommune(QgsProcessingAlgorithm):
             and "buildings" in loaded_layers
             and not feedback.isCanceled()
         ):
-            feedback.pushInfo("Calcul des positions SIRENE déplacées…")
+            feedback.pushInfo("   📌  Placement des établissements…")
             loaded_layers["sirene"] = build_displaced_sirene_layer(
                 loaded_layers["sirene"],
                 loaded_layers["buildings"],
                 feedback,
             )
-
-        # ── 4a. Filtrage des ZAI fictives ─────────────────────────────────────
-        # L'attribut 'fictif' est une chaîne "Vrai"/"Faux" dans BDTOPO WFS.
-        # On supprime en place les entités fictives sur la couche mémoire découpée.
-        zai_layer = loaded_layers.get("zai")
-        if zai_layer:
-            ids_to_delete = [
-                feat.id() for feat in zai_layer.getFeatures()
-                if str(feat["fictif"] or "").strip() == "Vrai"
-            ]
-            if ids_to_delete:
-                zai_layer.dataProvider().deleteFeatures(ids_to_delete)
-                feedback.pushInfo(
-                    f"{len(ids_to_delete)} ZAI fictive(s) supprimée(s)."
-                )
 
         # ── 4b. Couches bâtiments colorées par activité SIRENE ───────────────
         # build_activity_layers() fait le spatial join SIRENE × bâtiments et
@@ -437,39 +541,33 @@ class FDPParCommune(QgsProcessingAlgorithm):
             and "sirene" in loaded_layers
             and "buildings" in loaded_layers
         ):
-            feedback.pushInfo("Calcul des bâtiments par activité SIRENE…")
+            feedback.pushInfo("   🏗  Catégories d'activité…")
             activity_layers = build_activity_layers(
                 loaded_layers["buildings"], loaded_layers["sirene"], feedback
             )
-            feedback.pushInfo(
-                f"{len(activity_layers)} couche(s) d'activité SIRENE générée(s)."
-            )
+            feedback.pushInfo(f"   ✓  {len(activity_layers)} catégorie(s)")
 
         # ── 4c. Couches bâtiments colorées par zone d'activité (ZAI) ─────────
+        zai_layer = loaded_layers.get("zai")
         zone_layers = []
         if (
             not feedback.isCanceled()
             and zai_layer
             and "buildings" in loaded_layers
         ):
-            feedback.pushInfo("Génération des bâtiments par zone d'activité…")
+            feedback.pushInfo("   🏭  Zones d'activité…")
             zone_layers = build_zone_activity_layers(
                 loaded_layers["buildings"], zai_layer, feedback
             )
             n_cat = len({lbl for lbl, _ in zone_layers})
-            feedback.pushInfo(
-                f"{len(zone_layers)} couche(s) de zones générée(s) "
-                f"sur {n_cat} catégorie(s) ZAI."
-            )
+            feedback.pushInfo(f"   ✓  {len(zone_layers)} couche(s), {n_cat} catégorie(s)")
 
         # ── 4c-bis. Espaces publics extérieurs (parcs, places, squares…) ───────
         outdoor_layers = []
         if zai_layer and not feedback.isCanceled():
-            feedback.pushInfo("Génération des espaces publics extérieurs…")
+            feedback.pushInfo("   🌳  Espaces publics…")
             outdoor_layers = build_outdoor_space_layers(zai_layer, feedback)
-            feedback.pushInfo(
-                f"{len(outdoor_layers)} couche(s) d'espaces publics générée(s)."
-            )
+            feedback.pushInfo(f"   ✓  {len(outdoor_layers)} espace(s)")
             # Supprimer ces entités de la couche ZAI de base pour éviter le doublon.
             # Mêmme logique de label que dans zone_buildings.py (natd || nat).
             if outdoor_layers:
@@ -484,19 +582,14 @@ class FDPParCommune(QgsProcessingAlgorithm):
                         ids_outdoor.append(feat.id())
                 if ids_outdoor:
                     zai_layer.dataProvider().deleteFeatures(ids_outdoor)
-                    feedback.pushInfo(
-                        f"{len(ids_outdoor)} espace(s) public(s) retiré(s) de la couche ZAI."
-                    )
 
         # ── 4d. Couches équipements de transport colorées par type ───────────
         transport_layers = []
         equip_layer = loaded_layers.get("equipement_de_transport")
         if equip_layer and not feedback.isCanceled():
-            feedback.pushInfo("Génération des équipements de transport par type…")
+            feedback.pushInfo("   🚉  Équipements de transport…")
             transport_layers = build_transport_layers(equip_layer, feedback)
-            feedback.pushInfo(
-                f"{len(transport_layers)} couche(s) d'équipements générée(s)."
-            )
+            feedback.pushInfo(f"   ✓  {len(transport_layers)} type(s)")
 
         # ── 4e. Fond OSM optionnel ────────────────────────────────────────────
         osm_entry = next(
@@ -516,25 +609,71 @@ class FDPParCommune(QgsProcessingAlgorithm):
         bati_stats  = []
         bati_layers = []
         if "buildings" in loaded_layers and not feedback.isCanceled():
-            feedback.pushInfo("Classification intrinsèque du bâti…")
+            feedback.pushInfo("   🏘  Analyse du bâti…")
             bati_stats, bati_layers = build_bati_layers(loaded_layers["buildings"], feedback)
-            feedback.pushInfo(
-                f"{len(bati_layers)} couche(s) bâti intrinsèque + "
-                f"{len(bati_stats)} couche(s) statistique(s) générée(s)."
-            )
+            feedback.pushInfo(f"   ✓  {len(bati_layers)} couche(s)")
 
         # ── 5. Groupe QGIS + symbologie + ajout des couches ──────────────────
+        feedback.pushInfo("🗺  Assemblage du projet…")
         # L'ordre du dialogue est haut → bas dans la légende.
         # group.addLayer() ajoute en fin de liste enfants, donc le premier entry
         # se retrouve à l'index 0 (sommet = rendu par-dessus).
         root = QgsProject.instance().layerTreeRoot()
         group = root.insertGroup(0, nom)
 
+        _RPG_KEYS           = {"rpg_parcelles", "rpg_ilots", "rpg_pac", "rpg_pp", "rpg_iae", "rpg_zdh", "haie"}
+        _AEROPORT_KEYS      = {"aerodrome", "piste_d_aerodrome"}
+        _OUTDOOR_EXTRA_KEYS = {"terrain_de_sport", "cimetiere"}
+        _HYDRO_KEYS         = {"water_surface", "rivers", "reservoir"}
+        rpg_grp      = None   # créé à la demande au premier passage d'une couche RPG
+        parcels_layer_deferred = None  # ajouté à rpg_grp EN DERNIER (sous toutes les couches agri)
+        aeroport_grp = None   # créé à la demande
+        outdoor_grp  = None   # créé à la demande (ZAI outdoor_layers ou terrain/cimetière)
+        hydro_grp    = None   # créé à la demande au premier passage d'une couche hydro
+        transport_grp = None  # créé à la demande pour les équipements de transport
+        constr_grp    = None  # créé à la demande pour les constructions surfaciques
+
         for entry in selected_entries:
             sk = entry["style_key"]
             if sk not in loaded_layers:
                 continue
             layer = loaded_layers[sk]
+
+            # ── Couches agricoles → sous-groupe dédié ────────────────────────
+            if sk in _RPG_KEYS:
+                if rpg_grp is None:
+                    rpg_grp = group.addGroup("Agriculture")
+                if entry.get("style") is not None:
+                    self._apply_custom_style(layer, entry["style"], entry["geom_type"])
+                else:
+                    self._apply_style(layer, sk)
+                QgsProject.instance().addMapLayer(layer, False)
+                rpg_grp.addLayer(layer)
+                continue
+
+            # ── Aéroport → sous-groupe dédié ─────────────────────────────────
+            if sk in _AEROPORT_KEYS:
+                if aeroport_grp is None:
+                    aeroport_grp = group.addGroup("Aéroport")
+                if entry.get("style") is not None:
+                    self._apply_custom_style(layer, entry["style"], entry["geom_type"])
+                else:
+                    self._apply_style(layer, sk)
+                QgsProject.instance().addMapLayer(layer, False)
+                aeroport_grp.addLayer(layer)
+                continue
+
+            # ── Espaces publics (terrain de sport, cimetière) → groupe dédié ──
+            if sk in _OUTDOOR_EXTRA_KEYS:
+                if outdoor_grp is None:
+                    outdoor_grp = group.addGroup("Espaces publics extérieurs")
+                if entry.get("style") is not None:
+                    self._apply_custom_style(layer, entry["style"], entry["geom_type"])
+                else:
+                    self._apply_style(layer, sk)
+                QgsProject.instance().addMapLayer(layer, False)
+                outdoor_grp.addLayer(layer)
+                continue
 
             # ── Sous-groupes programmatiques ─────────────────────────────────
             if sk == "buildings":
@@ -564,10 +703,26 @@ class FDPParCommune(QgsProcessingAlgorithm):
                         bati_grp.addLayer(b_layer)
 
             if sk == "equipement_de_transport" and transport_layers:
-                grp = group.addGroup("Équipements de transport")
+                if transport_grp is None:
+                    transport_grp = group.addGroup("Équipements de transport")
                 for t_layer in transport_layers:
                     QgsProject.instance().addMapLayer(t_layer, False)
-                    grp.addLayer(t_layer)
+                    transport_grp.addLayer(t_layer)
+                continue   # sublayers remplacent la couche plate
+
+            if sk == "construction_surfacique":
+                constr_layers = build_construction_surfacique_layers(layer, feedback)
+                feedback.pushInfo(f"   ✓  {len(constr_layers)} type(s) de construction")
+                for c_layer in constr_layers:
+                    QgsProject.instance().addMapLayer(c_layer, False)
+                    if c_layer.name() in _PONT_NATURES:
+                        if transport_grp is None:
+                            transport_grp = group.addGroup("Équipements de transport")
+                        transport_grp.addLayer(c_layer)
+                    else:
+                        if constr_grp is None:
+                            constr_grp = group.addGroup("Constructions surfaciques")
+                        constr_grp.addLayer(c_layer)
                 continue   # sublayers remplacent la couche plate
 
             # ── Symbologie ───────────────────────────────────────────────────
@@ -580,27 +735,47 @@ class FDPParCommune(QgsProcessingAlgorithm):
             else:
                 self._apply_style(layer, sk)
 
-            QgsProject.instance().addMapLayer(layer, False)
-            group.addLayer(layer)
-
-            # Espaces publics extérieurs ajoutés après la couche ZAI → apparaissent dessous dans la légende
-            if sk == "zai" and outdoor_layers:
+            # Espaces publics extérieurs doit apparaître AU-DESSUS de ZAI dans la légende.
+            # On crée le groupe AVANT d'ajouter ZAI au groupe parent — les nœuds ajoutés
+            # en premier apparaissent en haut dans l'arbre QGIS.
+            if sk == "zai" and outdoor_layers and outdoor_grp is None:
                 outdoor_grp = group.addGroup("Espaces publics extérieurs")
+
+            QgsProject.instance().addMapLayer(layer, False)
+
+            # ── Routage vers sous-groupe ──────────────────────────────────────
+            if sk in _HYDRO_KEYS:
+                # Hydrographie (surface, cours d'eau, réservoir) → groupe dédié.
+                if hydro_grp is None:
+                    hydro_grp = group.addGroup("Hydrographie")
+                hydro_grp.addLayer(layer)
+            elif sk == "parcels":
+                # Parcelles cadastrales → différé : ajoutées à rpg_grp après la boucle
+                # pour qu'elles apparaissent en BAS du groupe Agriculture.
+                parcels_layer_deferred = layer
+            else:
+                group.addLayer(layer)
+
+            # Peuple outdoor_grp avec les couches ZAI outdoor (groupe déjà créé ci-dessus).
+            if sk == "zai" and outdoor_layers:
                 for o_layer in outdoor_layers:
                     QgsProject.instance().addMapLayer(o_layer, False)
                     outdoor_grp.addLayer(o_layer)
 
-        feedback.pushInfo(
-            f"{len(loaded_layers)} couche(s) chargée(s) dans le groupe « {nom} »."
-        )
+        # Parcelles cadastrales ajoutées APRÈS la boucle dans le groupe principal —
+        # ainsi elles apparaissent sous le groupe Agriculture sans en faire partie.
+        if parcels_layer_deferred is not None:
+            group.addLayer(parcels_layer_deferred)
+
+        feedback.pushInfo(f"✅  {len(loaded_layers)} couche(s) dans « {nom} »")
         feedback.setProgress(90)
 
         # ── 6. Proposition d'enregistrement .qgz ─────────────────────────────
         reply = QMessageBox.question(
             None,
-            "Enregistrer le projet",
-            f"Fond de plan « {nom} » créé avec succès.\n\n"
-            "Voulez-vous enregistrer le projet en fichier .qgz ?",
+            "Fond de plan prêt",
+            f"✅  Le fond de plan de {nom} est prêt !\n\n"
+            "Enregistrer le projet en fichier .qgz ?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -614,10 +789,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
             )
             if path:
                 QgsProject.instance().write(path)
-                feedback.pushInfo(f"Projet enregistré : {path}")
+                feedback.pushInfo(f"💾  Projet enregistré")
 
         feedback.setProgress(100)
-        feedback.pushInfo("Traitement terminé.")
+        feedback.pushInfo("🎉  Fond de plan prêt !")
         return {}
 
     # =========================================================================
@@ -777,20 +952,24 @@ class FDPParCommune(QgsProcessingAlgorithm):
         layer = QgsVectorLayer(uri, display_name, "WFS")
 
         if not layer.isValid():
-            feedback.pushWarning(f"  ⚠ Couche WFS invalide : {display_name}")
+            feedback.pushWarning(f"⚠  {display_name} — couche invalide")
             return None
         if layer.featureCount() == 0:
-            feedback.pushWarning(f"  ⚠ Aucune entité retournée : {display_name}")
+            feedback.pushWarning(f"⚠  {display_name} — vide sur la zone")
             return None
 
-        # Découpage sur le contour communal
+        # Découpage sur le contour communal.
+        # Certaines couches WFS (notamment RPG) contiennent des géométries
+        # invalides (auto-intersections, doublons de sommets…). On passe un
+        # QgsProcessingContext avec GeometrySkipInvalid pour que native:clip
+        # ignore ces entités au lieu d'interrompre le traitement.
+        clip_ctx = QgsProcessingContext()
+        clip_ctx.setInvalidGeometryCheck(QgsFeatureRequest.GeometrySkipInvalid)
         clipped = processing.run(
             "native:clip",
-            {
-                "INPUT": layer,
-                "OVERLAY": boundary_layer,
-                "OUTPUT": "memory:",
-            },
+            {"INPUT": layer, "OVERLAY": boundary_layer, "OUTPUT": "memory:"},
+            context=clip_ctx,
+            feedback=feedback,
         )["OUTPUT"]
         clipped.setName(display_name)
         return clipped
@@ -817,16 +996,13 @@ class FDPParCommune(QgsProcessingAlgorithm):
         aux éventuels changements de casse dans le fichier source.
         """
         url = f"https://files.data.gouv.fr/geo-sirene/last/communes/{insee}.csv"
-        feedback.pushInfo(f"  Téléchargement Géo-SIRENE commune {insee}…")
+        feedback.pushInfo(f"   ⬇  Géo-SIRENE…")
 
         try:
             resp = requests.get(url, timeout=60)
             resp.raise_for_status()
 
-            feedback.pushInfo(
-                f"  Fichier reçu ({len(resp.content) / 1024:.0f} Ko). "
-                f"Traitement en cours…"
-            )
+            feedback.pushInfo(f"   📦  {len(resp.content) / 1024:.0f} Ko — filtrage…")
 
             # ── Couche mémoire point (EPSG:4326) ─────────────────────────────
             mem_layer = QgsVectorLayer("Point?crs=EPSG:4326", "SIRENE_raw", "memory")
@@ -935,12 +1111,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
             pr.addFeatures(features)
             mem_layer.updateExtents()
-            feedback.pushInfo(
-                f"  {len(features)} établissement(s) actif(s) géolocalisé(s)."
-            )
+            feedback.pushInfo(f"   ✓  {len(features)} établissement(s)")
 
             if not features:
-                feedback.pushWarning("  ⚠ Aucun établissement actif géolocalisé.")
+                feedback.pushWarning("⚠  Aucun établissement localisé sur la commune")
                 return None
 
             # ── Reprojection EPSG:4326 → EPSG:2154 ───────────────────────────
@@ -967,12 +1141,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
             return clipped
 
         except requests.HTTPError as e:
-            feedback.pushWarning(
-                f"  ⚠ Fichier Géo-SIRENE introuvable pour la commune {insee} : {e}"
-            )
+            feedback.pushWarning(f"⚠  SIRENE : données indisponibles pour la commune {insee}")
             return None
         except Exception as e:
-            feedback.pushWarning(f"  ⚠ Erreur SIRENE : {e}\n{traceback.format_exc()}")
+            feedback.reportError(f"SIRENE — erreur inattendue : {e}\n{traceback.format_exc()}", fatalError=False)
             return None
 
     # =========================================================================
@@ -989,6 +1161,15 @@ class FDPParCommune(QgsProcessingAlgorithm):
             return
         if style_key == "zai":
             self._apply_zai_style(layer)
+            return
+        if style_key.startswith("rpg_"):
+            getattr(self, f"_apply_{style_key}_style")(layer)
+            return
+        if style_key == "roads":
+            self._apply_roads_style(layer)
+            return
+        if style_key == "railways":
+            self._apply_railways_style(layer)
             return
 
         # Chaque entrée est un callable qui renvoie un QgsSymbol configuré.
@@ -1030,24 +1211,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
                     "outline_style": "no",
                 }
             ),
-            # Voirie : ligne blanche (s'intègre au fond clair)
-            "roads": lambda: QgsLineSymbol.createSimple(
-                {
-                    "color": "#ffffff",
-                    "width": "0.5",
-                }
-            ),
-            # Voie ferrée : ligne grise continue
-            "railways": lambda: QgsLineSymbol.createSimple(
-                {
-                    "color": "#666666",
-                    "width": "0.7",
-                }
-            ),
-            # Bâti : gris moyen, sans contour
+            # Bâti : gris foncé, sans contour — contraste marqué avec les parcelles (#e0e0e0)
             "buildings": lambda: QgsFillSymbol.createSimple(
                 {
-                    "color": "#c0c0c0",
+                    "color": "#999999",
                     "outline_style": "no",
                 }
             ),
@@ -1057,6 +1224,110 @@ class FDPParCommune(QgsProcessingAlgorithm):
         if factory:
             layer.setRenderer(QgsSingleSymbolRenderer(factory()))
             layer.triggerRepaint()
+
+    def _apply_roads_style(self, layer: QgsVectorLayer):
+        """
+        Voirie — rendu règle par règle (QgsRuleBasedRenderer), premier filtre gagnant.
+
+        Priorité :
+          1. nature = 'Type autoroutier' / 'Bretelle'  (identification par nature)
+          2. importance '1' à '5'                       (identification par importance)
+          3. nature = 'Route empierrée' / 'Piste cyclable' / 'Chemin' / 'Sentier'
+        Invisible : importance = '6', nature IN ('Escalier', 'Bac ou liaison maritime').
+
+        Les filtres importance (règles 3-7) excluent explicitement les natures gérées
+        séparément pour éviter les doubles rendus.  Les filtres nature (règles 8-10)
+        excluent importance 1-6 : une route empierrée cotée ≤ 5 est rendue par sa
+        règle d'importance (premier gagnant), cotée 6 elle reste invisible.
+        """
+        def _rule(label, expr, color, width_mm, pen_style=Qt.SolidLine):
+            sl = QgsSimpleLineSymbolLayer()
+            sl.setColor(QColor(color))
+            sl.setWidth(width_mm)
+            sl.setPenStyle(pen_style)
+            sym = QgsLineSymbol()
+            sym.deleteSymbolLayer(0)
+            sym.appendSymbolLayer(sl)
+            rule = QgsRuleBasedRenderer.Rule(sym)
+            rule.setLabel(label)
+            rule.setFilterExpression(expr)
+            return rule
+
+        # Natures exclues des règles importance pour éviter les doubles rendus
+        _X = (
+            "\"nature\" NOT IN ("
+            "'Type autoroutier','Bretelle','Escalier','Bac ou liaison maritime'"
+            ")"
+        )
+        # Valeurs importance déjà traitées (ou à masquer) — exclues des règles nature
+        _NI = "\"importance\" NOT IN ('1','2','3','4','5','6')"
+
+        rules = [
+            # ── Nature prioritaire ────────────────────────────────────────────
+            # Rouge brique saturé : autoroutes bien distinctes, large trait lisible
+            ("Autoroute",      "\"nature\" = 'Type autoroutier'",               "#D94020", 0.8,  Qt.SolidLine),
+            # Orange vif : bretelles identifiables, trait fin
+            ("Bretelle",       "\"nature\" = 'Bretelle'",                       "#E06830", 0.35, Qt.SolidLine),
+            # ── Importance : dégradé ambré-brun (plus fin = plus sombre pour rester lisible)
+            ("Route imp. 1",   f"\"importance\" = '1' AND {_X}",                "#E89020", 0.55, Qt.SolidLine),
+            ("Route imp. 2",   f"\"importance\" = '2' AND {_X}",                "#D88028", 0.4,  Qt.SolidLine),
+            ("Route imp. 3",   f"\"importance\" = '3' AND {_X}",                "#C07030", 0.3,  Qt.SolidLine),
+            ("Route imp. 4",   f"\"importance\" = '4' AND {_X}",                "#A86028", 0.2,  Qt.SolidLine),
+            ("Route imp. 5",   f"\"importance\" = '5' AND {_X}",                "#8C4C20", 0.15, Qt.SolidLine),
+            # ── Nature secondaire ─────────────────────────────────────────────
+            # Brun terre : routes non revêtues, tirets
+            ("Empierrée",      f"\"nature\" = 'Route empierrée' AND {_NI}",     "#7A5030", 0.15, Qt.DashLine),
+            # Vert forêt : convention française pistes cyclables, pointillés
+            ("Piste cyclable", f"\"nature\" = 'Piste cyclable' AND {_NI}",      "#2E8840", 0.15, Qt.DotLine),
+            # Sienne foncé : chemins pédestres, pointillés, le plus fin
+            ("Chemin/Sentier", f"\"nature\" IN ('Chemin','Sentier') AND {_NI}", "#6A4820", 0.1,  Qt.DotLine),
+        ]
+
+        root = QgsRuleBasedRenderer.Rule(None)
+        for label, expr, color, width, pen in rules:
+            root.appendChild(_rule(label, expr, color, width, pen))
+
+        layer.setRenderer(QgsRuleBasedRenderer(root))
+        layer.triggerRepaint()
+
+    def _apply_railways_style(self, layer: QgsVectorLayer):
+        """Voie ferrée — rendu règle par règle (QgsRuleBasedRenderer)."""
+        def _rule(label, expr, color, width_mm, pen_style=Qt.SolidLine):
+            sl = QgsSimpleLineSymbolLayer()
+            sl.setColor(QColor(color))
+            sl.setWidth(width_mm)
+            sl.setPenStyle(pen_style)
+            sym = QgsLineSymbol()
+            sym.deleteSymbolLayer(0)
+            sym.appendSymbolLayer(sl)
+            rule = QgsRuleBasedRenderer.Rule(sym)
+            rule.setLabel(label)
+            rule.setFilterExpression(expr)
+            return rule
+
+        rules = [
+            # Famille violet-indigo, en écho aux marqueurs de stations existants
+            # (#AB47BC tramway, #7B1FA2 métro) — cohérence point/ligne garantie.
+            # Indigo nuit : LGV, trait large très lisible
+            ("LGV",             "\"nature\" = 'LGV'",                       "#1C0878", 0.6,  Qt.SolidLine),
+            # Indigo-violet moyen : grande ligne classique
+            ("Voie ferrée",     "\"nature\" = 'Voie ferrée principale'",     "#4030A0", 0.45, Qt.SolidLine),
+            # Violet vif : fait écho au marqueur de station tramway (#AB47BC)
+            ("Tramway",         "\"nature\" = 'Tramway'",                    "#9838B0", 0.3,  Qt.SolidLine),
+            # Violet profond : fait écho au marqueur de station métro (#7B1FA2)
+            ("Métro",           "\"nature\" = 'Métro'",                      "#701890", 0.3,  Qt.SolidLine),
+            # Lavande pâle : voie secondaire, tirets discrets
+            ("Voie de service", "\"nature\" = 'Voie de service'",            "#A878C8", 0.15, Qt.DashLine),
+            # Ardoise-violet : funiculaire, distinct des autres
+            ("Funiculaire",     "\"nature\" = 'Funiculaire ou crémaillère'", "#6A50A8", 0.2,  Qt.SolidLine),
+        ]
+
+        root = QgsRuleBasedRenderer.Rule(None)
+        for label, expr, color, width, pen in rules:
+            root.appendChild(_rule(label, expr, color, width, pen))
+
+        layer.setRenderer(QgsRuleBasedRenderer(root))
+        layer.triggerRepaint()
 
     def _apply_sirene_style(self, layer: QgsVectorLayer):
         """
@@ -1242,6 +1513,220 @@ class FDPParCommune(QgsProcessingAlgorithm):
         layer.triggerRepaint()
 
     # =========================================================================
+    # Helpers – symbologie RPG
+    # =========================================================================
+
+    def _apply_rpg_parcelles_style(self, layer: QgsVectorLayer):
+        """
+        Rendu règle-par-règle des parcelles agricoles RPG.
+        Champ : code_cultu (xsd:string).
+        Codes vérifiés sur RPG.LATEST:codes_cultures (147 entrées, 2025-03-04).
+        Toutes les 146 entrées actives sont mappées ; ZZZ (culture inconnue)
+        tombe dans le repli.
+        """
+        groups = [
+            # ── Céréales ──────────────────────────────────────────────────────
+            ("Céréales",
+             ("AVH", "AVP", "BDH", "BDP", "BTH", "BTP", "CAG", "CAH", "EPE",
+              "MCS", "MCR", "MID", "MIS", "MLT", "MOH", "ORH", "ORP", "RIZ",
+              "SGH", "SGP", "SOG", "SRS", "TTH", "TTP"),
+             "#F0D060"),
+            # ── Oléagineux & protéagineux ──────────────────────────────────────
+            ("Oléagineux & protéagineux",
+             ("ARA", "CML", "CZH", "CZP", "FEV", "FVL", "FVP", "GES", "LDH",
+              "LDP", "LEC", "LIH", "LIP", "MOT", "MPC", "OAG", "OEI", "OHR",
+              "PAG", "PCH", "PHI", "PHS", "PPR", "SOJ", "TRN"),
+             "#E8A800"),
+            # ── Prairies permanentes ───────────────────────────────────────────
+            # PPH = prairie perm. herbe préd. ; SPH/SPL = surfaces pastorales
+            ("Prairies permanentes",
+             ("PPH", "SPH", "SPL"),
+             "#18A018"),
+            # ── Prairies & fourrages temporaires ──────────────────────────────
+            ("Prairies & fourrages temporaires",
+             ("AFG", "CPL", "GRA", "LOT", "LUZ", "MLC", "MLF", "MLG", "PTR",
+              "SAI", "TRE", "VES"),
+             "#70DC70"),
+            # ── Vignes ────────────────────────────────────────────────────────
+            ("Vignes",
+             ("VRC",),
+             "#8B1A2A"),
+            # ── Arboriculture & vergers ────────────────────────────────────────
+            ("Arboriculture & vergers",
+             ("ACP", "AGR", "CBT", "CTG", "FLP", "NOS", "NOX", "OLI", "PRU",
+              "PVT", "PWT", "TRU", "VRG"),
+             "#FF8C00"),
+            # ── Maraîchage & légumes ───────────────────────────────────────────
+            ("Maraîchage & légumes",
+             ("AIL", "ART", "CAR", "CCN", "CEL", "CHU", "EPI", "FLA", "FRA",
+              "LBF", "MDI", "MLO", "NVT", "OIG", "PFR", "PHF", "POR", "POT",
+              "PSL", "PTC", "PVP", "RDI", "TOM"),
+             "#70EC70"),
+            # ── Jachères & surfaces temporairement non exploitées ─────────────
+            ("Jachères & sol nu",
+             ("JAC", "JNO", "SNE"),
+             "#D4A060"),
+            # ── Cultures industrielles & énergie ──────────────────────────────
+            ("Cultures industrielles & énergie",
+             ("BTN", "CHV", "CSE", "HBL", "LIF", "MSW", "TAB", "TCR"),
+             "#E07820"),
+            # ── PPAM — Plantes à Parfum, Aromatiques et Médicinales ───────────
+            ("PPAM — Aromatiques & médicinales",
+             ("AAR", "AME", "ARP", "FNU", "LAV", "PME", "PPP", "PRF"),
+             "#CC60CC"),
+            # ── Horticulture & pépinières ──────────────────────────────────────
+            ("Horticulture & pépinières",
+             ("CSS", "HPC", "PEP", "PEV"),
+             "#90D890"),
+            # ── Surfaces boisées & sylvopastorale ─────────────────────────────
+            # SBO = boisement sur ancienne SAU ; CAE/CEE = entretenues par
+            # porcs/ruminants ; CNA/CNE = non entretenues
+            ("Surfaces boisées",
+             ("CAE", "CEE", "CNA", "CNE", "SBO"),
+             "#207030"),
+            # ── Cultures tropicales (DOM) ──────────────────────────────────────
+            ("Cultures tropicales",
+             ("ANA", "BCA", "BEF", "CAC", "CSA", "SHD", "TBT", "VNL"),
+             "#F4A04E"),
+            # ── Surfaces environnementales ─────────────────────────────────────
+            # Bandes tampons, bordures, marais, roselières, parcours non utilisés
+            ("Surfaces environnementales",
+             ("BFS", "BOR", "BTA", "MRS", "SAG", "SIN", "SNU"),
+             "#88C099"),
+            # ── Mélanges complexes (interrangs) ───────────────────────────────
+            ("Mélanges complexes",
+             ("CID", "CIT"),
+             "#C8B830"),
+        ]
+        root_rule = QgsRuleBasedRenderer.Rule(None)
+        for label, codes, color in groups:
+            quoted = ", ".join(f"'{c}'" for c in codes)
+            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
+            rule = QgsRuleBasedRenderer.Rule(sym)
+            rule.setFilterExpression(f'"code_cultu" IN ({quoted})')
+            rule.setLabel(label)
+            root_rule.appendChild(rule)
+        # ZZZ (culture inconnue) et tout code non encore répertorié
+        fallback_sym = QgsFillSymbol.createSimple({"color": "#E8D880", "outline_style": "no"})
+        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
+        fallback_rule.setFilterExpression("ELSE")
+        fallback_rule.setLabel("Culture non identifiée")
+        root_rule.appendChild(fallback_rule)
+        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
+        layer.triggerRepaint()
+
+    def _apply_rpg_ilots_style(self, layer: QgsVectorLayer):
+        """Îlots anonymisés RPG — grille neutre, sans catégorisation."""
+        sym = QgsFillSymbol.createSimple({
+            "color":         "#EEE8C0",
+            "outline_color": "#AAAAAA",
+            "outline_width": "0.3",
+        })
+        layer.setRenderer(QgsSingleSymbolRenderer(sym))
+        layer.triggerRepaint()
+
+    def _apply_rpg_pac_style(self, layer: QgsVectorLayer):
+        """
+        Rendu par catégorie PAC — champ cat_cult_p (xsd:string).
+        Valeurs attendues : 'TA', 'PP', 'CP', 'SB' (codes officiels PAC).
+        """
+        rules_data = [
+            ("TA", "Terres arables",       "#F0D060"),
+            ("CP", "Cultures permanentes", "#FF8C00"),
+            ("PP", "Prairies permanentes", "#18A018"),
+            ("SB", "Surfaces boisées",     "#207030"),
+        ]
+        root_rule = QgsRuleBasedRenderer.Rule(None)
+        for code, label, color in rules_data:
+            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
+            rule = QgsRuleBasedRenderer.Rule(sym)
+            rule.setFilterExpression(f'"cat_cult_p" = \'{code}\'')
+            rule.setLabel(label)
+            root_rule.appendChild(rule)
+        fallback_sym = QgsFillSymbol.createSimple({"color": "#E8E8E8", "outline_style": "no"})
+        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
+        fallback_rule.setFilterExpression("ELSE")
+        fallback_rule.setLabel("Autre / non classé")
+        root_rule.appendChild(fallback_rule)
+        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
+        layer.triggerRepaint()
+
+    def _apply_rpg_pp_style(self, layer: QgsVectorLayer):
+        """Prairies permanentes RPG — remplissage vert uniforme."""
+        sym = QgsFillSymbol.createSimple({"color": "#29A86A", "outline_style": "no"})
+        layer.setRenderer(QgsSingleSymbolRenderer(sym))
+        layer.triggerRepaint()
+
+    def _apply_rpg_iae_style(self, layer: QgsVectorLayer):
+        """
+        Parcelles éligibles IAE — palette verte biodiversité sur code_cultu.
+        La couche est déjà filtrée elig_iae=1 côté serveur ; on accentue
+        les éléments à haute valeur écologique (prairies, boisements,
+        légumineuses) et on atténue les cultures céréalières.
+        """
+        groups = [
+            ("Prairies permanentes",
+             ("PPH", "SPH", "SPL"),
+             "#18A018"),
+            ("Prairies & fourrages temporaires",
+             ("AFG", "CPL", "GRA", "LOT", "LUZ", "MLC", "MLF", "MLG", "PTR",
+              "SAI", "TRE", "VES"),
+             "#29A86A"),
+            ("Légumineuses & protéagineux",
+             ("FEV", "FVL", "FVP", "GES", "LDH", "LDP", "LEC", "MPC",
+              "PAG", "PCH", "PHI", "PHS", "PPR"),
+             "#45C484"),
+            ("Surfaces boisées",
+             ("CAE", "CEE", "CNA", "CNE", "SBO"),
+             "#207030"),
+            ("Céréales",
+             ("AVH", "AVP", "BDH", "BDP", "BTH", "BTP", "CAG", "CAH", "EPE",
+              "MCS", "MCR", "MID", "MIS", "MLT", "MOH", "ORH", "ORP", "RIZ",
+              "SGH", "SGP", "SOG", "SRS", "TTH", "TTP"),
+             "#90DCA8"),
+        ]
+        root_rule = QgsRuleBasedRenderer.Rule(None)
+        for label, codes, color in groups:
+            quoted = ", ".join(f"'{c}'" for c in codes)
+            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
+            rule = QgsRuleBasedRenderer.Rule(sym)
+            rule.setFilterExpression(f'"code_cultu" IN ({quoted})')
+            rule.setLabel(label)
+            root_rule.appendChild(rule)
+        fallback_sym = QgsFillSymbol.createSimple({"color": "#45C484", "outline_style": "no"})
+        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
+        fallback_rule.setFilterExpression("ELSE")
+        fallback_rule.setLabel("Autres éléments IAE")
+        root_rule.appendChild(fallback_rule)
+        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
+        layer.triggerRepaint()
+
+    def _apply_rpg_zdh_style(self, layer: QgsVectorLayer):
+        """
+        Zones de densité homogène (ZDH) — dégradé sur le champ prorata.
+        prorata (xsd:string) représente la proportion de surface agricole
+        dans la zone ; converti en réel avec to_real() dans l'expression.
+        """
+        rules_data = [
+            ('to_real("prorata") >= 0.8', "ZDH — forte densité",   "#D87020"),
+            ('to_real("prorata") >= 0.5', "ZDH — densité moyenne", "#D4B060"),
+        ]
+        root_rule = QgsRuleBasedRenderer.Rule(None)
+        for expr, label, color in rules_data:
+            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
+            rule = QgsRuleBasedRenderer.Rule(sym)
+            rule.setFilterExpression(expr)
+            rule.setLabel(label)
+            root_rule.appendChild(rule)
+        fallback_sym = QgsFillSymbol.createSimple({"color": "#F0EAD6", "outline_style": "no"})
+        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
+        fallback_rule.setFilterExpression("ELSE")
+        fallback_rule.setLabel("ZDH — faible densité / indéterminé")
+        root_rule.appendChild(fallback_rule)
+        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
+        layer.triggerRepaint()
+
+    # =========================================================================
     # Helper – symbologie personnalisée (depuis _LayerSelectorDialog)
     # =========================================================================
 
@@ -1331,17 +1816,14 @@ class _CommuneSelectDialog(QDialog):
 
     def __init__(self, features: list, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Sélectionner une commune")
+        self.setWindowTitle("Commune")
         self.setMinimumWidth(400)
         self.selected_commune = None
         self._features = features
 
         layout = QVBoxLayout(self)
         layout.addWidget(
-            QLabel(
-                f"{len(features)} communes correspondent à votre recherche.\n"
-                "Sélectionnez la commune souhaitée :"
-            )
+            QLabel(f"{len(features)} résultat(s) — sélectionnez la commune :")
         )
 
         self._list = QListWidget()
@@ -1389,7 +1871,7 @@ class _LayerSelectorDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Sélection et style des couches")
+        self.setWindowTitle("Couches du fond de plan")
         self.setMinimumSize(1000, 640)
         self.result_layers = []
 
@@ -1426,9 +1908,12 @@ class _LayerSelectorDialog(QDialog):
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(6, 6, 6, 6)
 
-        self._build_section(scroll_layout, "Couches par défaut",    "default",     collapsible=False)
-        self._build_section(scroll_layout, "Couches recommandées",  "recommended", collapsible=False)
-        self._build_section(scroll_layout, "Couches avancées",      "advanced",    collapsible=True)
+        self._build_section(scroll_layout, "Fond de plan",         "default", collapsible=False)
+        self._build_section(scroll_layout, "Données thématiques", "extra",   collapsible=True)
+        self._build_section(
+            scroll_layout, "Agriculture", "rural", collapsible=True,
+            note="Recommandé pour les communes rurales.",
+        )
         scroll_layout.addStretch()
 
         scroll.setWidget(scroll_content)
@@ -1441,7 +1926,7 @@ class _LayerSelectorDialog(QDialog):
         splitter.addWidget(right_outer)
 
         # Liste d'ordre
-        order_group = QGroupBox("Ordre des couches  (haut = rendu par-dessus)")
+        order_group = QGroupBox("Ordre des couches  ↑ haut = premier plan")
         order_vbox = QVBoxLayout(order_group)
 
         self._order_list = QListWidget()
@@ -1466,7 +1951,7 @@ class _LayerSelectorDialog(QDialog):
         # le temps que le prochain tour d'event loop les supprime.
         self._style_content = QWidget()
         QVBoxLayout(self._style_content).addWidget(
-            QLabel("Sélectionnez une couche dans la liste.")
+            QLabel("← Sélectionnez une couche pour éditer son style.")
         )
         self._style_vbox.addWidget(self._style_content)
         right_layout.addWidget(self._style_group, stretch=3)
@@ -1484,11 +1969,45 @@ class _LayerSelectorDialog(QDialog):
         self._btn_down.clicked.connect(lambda: self._move_row(1))
         self._order_list.currentRowChanged.connect(self._on_selection_changed)
 
-    def _build_section(self, parent_layout, title, section, collapsible):
+    def _build_section(self, parent_layout, title, section, collapsible, note=None):
         """Construit un QGroupBox avec les checkboxes de la section donnée."""
         entries = [e for e in _LAYER_CATALOGUE if e["section"] == section]
         group = QGroupBox(title)
         group_vbox = QVBoxLayout(group)
+
+        if section == "rural":
+            # Section agriculture : case unique dans l'en-tête — cocher charge
+            # toutes les couches du groupe d'un coup.
+            group.setCheckable(True)
+            group.setChecked(False)
+            container = QWidget()
+            container_vbox = QVBoxLayout(container)
+            container_vbox.setContentsMargins(0, 0, 0, 0)
+            if note:
+                note_lbl = QLabel(note)
+                note_lbl.setStyleSheet("color: #888888; font-size: 9pt;")
+                note_lbl.setWordWrap(True)
+                container_vbox.addWidget(note_lbl)
+            for entry in entries:
+                lbl = QLabel("• " + entry["display_name"])
+                lbl.setStyleSheet("color: #555555; font-size: 9pt;")
+                container_vbox.addWidget(lbl)
+            group_vbox.addWidget(container)
+            container.setVisible(False)
+            group.toggled.connect(container.setVisible)
+            def _on_rural_toggled(checked, _entries=entries):
+                for e in _entries:
+                    if checked:
+                        if not any(
+                            self._order_list.item(j).data(Qt.UserRole) == e["style_key"]
+                            for j in range(self._order_list.count())
+                        ):
+                            self._add_to_order(e)
+                    else:
+                        self._remove_from_order(e["style_key"])
+            group.toggled.connect(_on_rural_toggled)
+            parent_layout.addWidget(group)
+            return
 
         if collapsible:
             # Technique collapse : QGroupBox checkable + conteneur masquable.
@@ -1499,6 +2018,11 @@ class _LayerSelectorDialog(QDialog):
             container = QWidget()
             container_vbox = QVBoxLayout(container)
             container_vbox.setContentsMargins(0, 0, 0, 0)
+            if note:
+                note_lbl = QLabel(note)
+                note_lbl.setStyleSheet("color: #888888; font-size: 9pt;")
+                note_lbl.setWordWrap(True)
+                container_vbox.addWidget(note_lbl)
             for entry in entries:
                 cb = self._make_checkbox(entry)
                 container_vbox.addWidget(cb)
@@ -1506,6 +2030,11 @@ class _LayerSelectorDialog(QDialog):
             container.setVisible(False)
             group.toggled.connect(container.setVisible)
         else:
+            if note:
+                note_lbl = QLabel(note)
+                note_lbl.setStyleSheet("color: #888888; font-size: 9pt;")
+                note_lbl.setWordWrap(True)
+                group_vbox.addWidget(note_lbl)
             for entry in entries:
                 cb = self._make_checkbox(entry)
                 group_vbox.addWidget(cb)
@@ -1587,10 +2116,14 @@ class _LayerSelectorDialog(QDialog):
         new_content = QWidget()
         lay = QVBoxLayout(new_content)
 
-        if sk == "sirene":
-            lay.addWidget(
-                QLabel("Style SIRENE : rendu par règles NAF (non modifiable ici).")
-            )
+        _RULE_BASED_KEYS = {"sirene", "roads", "railways"}
+        _RULE_BASED_LABELS = {
+            "sirene":   "Symbologie par catégorie NAF — automatique.",
+            "roads":    "Symbologie hiérarchique par nature et importance — automatique.",
+            "railways": "Symbologie par type de voie — automatique.",
+        }
+        if sk in _RULE_BASED_KEYS:
+            lay.addWidget(QLabel(_RULE_BASED_LABELS.get(sk, "Rendu par règles — non modifiable ici.")))
             lay.addStretch()
             self._swap_style_content(new_content)
             return

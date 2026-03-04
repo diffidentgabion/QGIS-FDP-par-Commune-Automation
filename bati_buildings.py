@@ -174,11 +174,11 @@ def build_bati_layers(buildings_layer, feedback) -> tuple:
     # ── Couches de classification ─────────────────────────────────────────────
     classif_layers: list = []
     _BUCKET_SPECS = [
-        ("residentiel", "Bâti — Résidentiel", "#C0C0C0"),
-        ("religieux",   "Bâti — Religieux",   "#9B72AA"),
-        ("chateau",     "Bâti — Château",      "#C1121F"),
-        ("industriel",  "Bâti — Industriel",   "#8B5E3C"),
-        ("non_classe",  "Bâti — Non classé",   "#AAAAAA"),
+        ("residentiel", "Bâti — Résidentiel", "#B0AECA"),   # lavande douce
+        ("religieux",   "Bâti — Religieux",   "#8B50D0"),   # violet saturé
+        ("chateau",     "Bâti — Château",      "#C1121F"),   # rouge vif — inchangé
+        ("industriel",  "Bâti — Industriel",   "#C06828"),   # sienna chaud
+        ("non_classe",  "Bâti — Non classé",   "#A8A8BC"),   # gris bleuté neutre
     ]
     for bucket_key, layer_name, color_hex in _BUCKET_SPECS:
         feats = buckets[bucket_key]
@@ -317,15 +317,14 @@ def _make_height_layer(crs_id, fields, height_data):
 
     # ③ Une classe par niveau (ranges [0.5,1.5], [1.5,2.5] …) — chaque entier
     #    tombe au centre de sa plage, sans ambiguïté de frontière.
-    #    Interpolation linéaire #C0C0C0 (1 étage, visible) → #303030 (≥ 20 étages).
-    #    generate_gradient part de v=1.0 (blanc) ce qui rend les 1-étage invisibles ;
-    #    on calcule donc les couleurs directement.
+    #    Dégradé gris : #C8C8C8 (1 étage, gris moyen — plus foncé que le parcellaire #E0E0E0)
+    #    → #141414 (max, quasi-noir). Plage de 180 points.
     n_classes = max(max_floors_cap, 1)
     ranges    = []
     for i in range(n_classes):
         floor_val = i + 1
         t         = i / max(n_classes - 1, 1)   # 0.0 (1 floor) → 1.0 (max floor)
-        v         = int(192 - t * 144)           # 192 (#C0) → 48 (#30)
+        v         = int(200 - t * 180)           # 200 (#C8) → 20 (#14)
         lower     = float(floor_val) - 0.5
         upper     = float(floor_val) + 0.5
         sym       = QgsFillSymbol.createSimple({
