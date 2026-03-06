@@ -109,6 +109,15 @@ _sd_spec.loader.exec_module(_sd_mod)
 build_displaced_sirene_layer = _sd_mod.build_displaced_sirene_layer
 del _sd_spec, _sd_mod
 
+_tm_spec = importlib.util.spec_from_file_location(
+    "theme_manager",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "theme_manager.py"),
+)
+_tm_mod = importlib.util.module_from_spec(_tm_spec)
+_tm_spec.loader.exec_module(_tm_mod)
+ensure_theme_manager = _tm_mod.ensure_theme_manager
+del _tm_spec, _tm_mod
+
 # =============================================================================
 # Catalogue des couches et styles par défaut
 # =============================================================================
@@ -166,7 +175,7 @@ _LAYER_CATALOGUE = [
      "geom_type": "polygon", "checked": False},
     # ── Couches supplémentaires ───────────────────────────────────────────────
     {"section": "extra",       "typename": "BDTOPO_V3:erp",                            "display_name": "ERP",                          "style_key": "erp",                      "geom_type": "point",   "checked": False},
-    {"section": "extra",       "typename": "BDTOPO_V3:construction_surfacique",        "display_name": "Constructions surfaciques",     "style_key": "construction_surfacique",  "geom_type": "polygon", "checked": False},
+    {"section": "default",     "typename": "BDTOPO_V3:construction_surfacique",        "display_name": "Constructions surfaciques",     "style_key": "construction_surfacique",  "geom_type": "polygon", "checked": True},
     {"section": "extra",       "typename": "BDTOPO_V3:itineraire_autre",               "display_name": "Itinéraires (vélo, pédestre)", "style_key": "itineraire_autre",         "geom_type": "line",    "checked": False},
     {"section": "extra",       "typename": "BDTOPO_V3:detail_hydrographique",          "display_name": "Détails hydrographiques",      "style_key": "detail_hydrographique",    "geom_type": "point",   "checked": False},
     {"section": "extra",       "typename": "BDTOPO_V3:foret_publique",                 "display_name": "Forêts publiques",             "style_key": "foret_publique",           "geom_type": "polygon", "checked": False},
@@ -790,6 +799,15 @@ class FDPParCommune(QgsProcessingAlgorithm):
             if path:
                 QgsProject.instance().write(path)
                 feedback.pushInfo(f"💾  Projet enregistré")
+
+        # ── 7. Gestionnaire de thèmes ─────────────────────────────────────────
+        # Ouvre (ou retrouve) le panneau de thèmes dans la session QGIS courante.
+        # Idempotent : plusieurs exécutions du script ne créent qu'un seul dock.
+        try:
+            from qgis.utils import iface as _iface
+            ensure_theme_manager(_iface)
+        except Exception:
+            pass   # hors contexte GUI (tests headless) — on continue sans le dock
 
         feedback.setProgress(100)
         feedback.pushInfo("🎉  Fond de plan prêt !")

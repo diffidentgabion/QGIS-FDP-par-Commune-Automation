@@ -459,7 +459,7 @@ def build_zone_activity_layers(
         for nature_label, color, fids in sublayers:
             mem_layer = QgsVectorLayer(
                 f"Polygon?crs={crs_id}",
-                nature_label,   # nom court : le nom de la catégorie est dans le sous-groupe parent
+                f"Bâti ZAI — {cat['label']} — {nature_label}",
                 "memory",
             )
             pr = mem_layer.dataProvider()
@@ -532,7 +532,7 @@ def build_outdoor_space_layers(zai_layer: QgsVectorLayer, feedback) -> list:
 
         mem_layer = QgsVectorLayer(
             f"Polygon?crs={crs_id}",
-            label,
+            f"Espace public — {label}",
             "memory",
         )
         pr = mem_layer.dataProvider()
