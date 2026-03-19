@@ -43,6 +43,7 @@ _sb_spec = importlib.util.spec_from_file_location(
 _sb_mod = importlib.util.module_from_spec(_sb_spec)
 _sb_spec.loader.exec_module(_sb_mod)
 SIRENE_CATEGORIES = _sb_mod.SIRENE_CATEGORIES
+_category_index   = _sb_mod._category_index   # évite la duplication de la logique NAF
 del _sb_spec, _sb_mod
 
 # =============================================================================
@@ -57,33 +58,6 @@ RADIUS_PER_POINT_M = 1.5   # mètres supplémentaires par point dans un groupe
 # =============================================================================
 
 _CATCHALL_IDX = len(SIRENE_CATEGORIES) - 1
-
-
-def _get_category_index(naf_code: str) -> int:
-    """Retourne l'index dans SIRENE_CATEGORIES pour un code NAF complet."""
-    naf_clean = (naf_code or "").strip()
-    naf_div   = None
-    if naf_clean and len(naf_clean) >= 2:
-        try:
-            naf_div = int(naf_clean[:2])
-        except ValueError:
-            pass
-
-    for idx, cat in enumerate(SIRENE_CATEGORIES[:-1]):
-        exact = cat.get("naf_exact_codes")
-        if exact and naf_clean in exact:
-            return idx
-
-    if naf_div is not None:
-        for idx, cat in enumerate(SIRENE_CATEGORIES[:-1]):
-            for lo, hi in cat.get("naf_ranges", []):
-                if lo <= naf_div <= hi:
-                    excludes = cat.get("naf_exclude_suffixes", ())
-                    if any(naf_clean.endswith(suf) for suf in excludes):
-                        break
-                    return idx
-
-    return _CATCHALL_IDX
 
 
 def _naf_div_expr(ranges: list) -> str:
@@ -162,7 +136,7 @@ def build_displaced_sirene_layer(
     for src_feat in sirene_layer.getFeatures():
         n_input += 1
         naf     = src_feat["activitePrincipaleEtablissement"] or ""
-        cat_idx = _get_category_index(naf)
+        cat_idx = _category_index(naf)
         anchor  = point_to_anchor[src_feat.id()]
         key     = (f"{anchor.x():.3f},{anchor.y():.3f}", cat_idx)
         if key not in seen:

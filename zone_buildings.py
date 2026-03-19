@@ -26,7 +26,6 @@ natures_ordered liste les labels attendus par ordre d'intensité visuelle
 """
 
 from qgis.core import (
-    QgsFeatureRequest,
     QgsFillSymbol,
     QgsSingleSymbolRenderer,
     QgsSpatialIndex,
@@ -358,11 +357,18 @@ def build_zone_activity_layers(
     """
     crs_id = buildings_layer.crs().authid()
 
-    # ── Étape 1 : index spatial + cache géométrie des bâtiments ──────────────
-    bld_index = QgsSpatialIndex(buildings_layer.getFeatures())
+    # ── Étape 1 : index spatial + cache géométrie et features des bâtiments ───
+    # On itère une seule fois pour remplir à la fois l'index, le cache géométrie
+    # et le cache feature complet — évite N requêtes provider lors de la
+    # construction des couches mémoire (une par sublayer) plus bas.
+    bld_index = QgsSpatialIndex()
     bld_geom = {}
+    bld_feat = {}
     for feat in buildings_layer.getFeatures():
-        bld_geom[feat.id()] = feat.geometry()
+        fid = feat.id()
+        bld_index.addFeature(feat)
+        bld_geom[fid] = feat.geometry()
+        bld_feat[fid] = feat
 
     if not bld_geom:
         return []
@@ -466,9 +472,7 @@ def build_zone_activity_layers(
             pr.addAttributes(fields.toList())
             mem_layer.updateFields()
 
-            feats = list(buildings_layer.getFeatures(
-                QgsFeatureRequest().setFilterFids(list(fids))
-            ))
+            feats = [bld_feat[fid] for fid in fids if fid in bld_feat]
             pr.addFeatures(feats)
             mem_layer.updateExtents()
 
