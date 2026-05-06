@@ -2645,13 +2645,15 @@ class _LayerSelectorDialog(QDialog):
 
         self._build_section(scroll_layout, "Fond de plan", "default", collapsible=False)
         self._build_section(
-            scroll_layout, "Données thématiques", "extra", collapsible=True
+            scroll_layout, "Données thématiques", "extra", collapsible=True,
+            checkbox_all=True,
         )
         self._build_section(
             scroll_layout,
             "Agriculture",
             "rural",
             collapsible=True,
+            checkbox_all=True,
             note="Recommandé pour les communes rurales.",
         )
         scroll_layout.addStretch()
@@ -2770,15 +2772,15 @@ class _LayerSelectorDialog(QDialog):
         hbox.addStretch()
         return group
 
-    def _build_section(self, parent_layout, title, section, collapsible, note=None):
+    def _build_section(self, parent_layout, title, section, collapsible, note=None, checkbox_all=False):
         """Construit un QGroupBox avec les checkboxes de la section donnée."""
         entries = [e for e in _LAYER_CATALOGUE if e["section"] == section]
         group = QGroupBox(title)
         group_vbox = QVBoxLayout(group)
 
-        if section == "rural":
-            # Section agriculture : case unique dans l'en-tête — cocher charge
-            # toutes les couches du groupe d'un coup.
+        if checkbox_all:
+            # Case unique dans l'en-tête — cocher active toutes les couches
+            # du groupe d'un coup (pas de case individuelle par couche).
             group.setCheckable(True)
             group.setChecked(False)
             container = QWidget()
