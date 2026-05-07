@@ -8,9 +8,7 @@ Installation :
     → pointer vers le dossier contenant ce fichier, puis recharger les fournisseurs.
 """
 
-import csv
 import importlib.util
-import io
 import json
 import os
 import tempfile
@@ -141,7 +139,7 @@ _LAYER_CATALOGUE = [
     {
         "section": "default",
         "typename": "ADMINEXPRESS-COG-CARTO.LATEST:commune",
-        "display_name": "Commune (limite)",
+        "display_name": "Commune",
         "style_key": "commune_boundary",
         "geom_type": "polygon",
         "checked": True,
@@ -1332,9 +1330,16 @@ class FDPParCommune(QgsProcessingAlgorithm):
         _BASE = "https://geo.api.gouv.fr/communes"
 
         def _fetch(url):
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            return resp.json().get("features", [])
+            import time
+            for attempt in range(4):
+                try:
+                    resp = requests.get(url, timeout=15)
+                    resp.raise_for_status()
+                    return resp.json().get("features", [])
+                except Exception:
+                    if attempt == 3:
+                        raise
+                    time.sleep(2 ** attempt)
 
         features = []
         seen_codes = set()
@@ -1502,24 +1507,123 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback,
     ):
         """
-        Télécharge le CSV Géo-SIRENE par commune depuis files.data.gouv.fr.
+        Télécharge les établissements SIRENE via l'API recherche-entreprises.
+        Remplace le service files.data.gouv.fr/geo-sirene décommissionné en avril 2026.
 
-        Le fichier contient uniquement les établissements de la commune — pas
-        de filtrage par code commune nécessaire. Une seule requête HTTP, pas
-        de décompression, pas de pagination.
-
-        Les noms de colonnes sont normalisés en minuscules pour être robustes
-        aux éventuels changements de casse dans le fichier source.
+        Pour les communes dépassant 10 000 entreprises (cap API), les requêtes sont
+        automatiquement découpées par section NAF × statut entrepreneur individuel
+        (34 groupes mutuellement exclusifs), puis toutes les pages de tous les groupes
+        sont récupérées en parallèle en une seule vague.
         """
-        url = f"https://files.data.gouv.fr/geo-sirene/last/communes/{insee}.csv"
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Sections NAF actives (T=97-98 ménages employeurs, U=99 extraterritorial exclus)
+        _SECTIONS = list("ABCDEFGHIJKLMNOPQRS")
+
+        base_url = "https://recherche-entreprises.api.gouv.fr/search"
         feedback.pushInfo(f"   ⬇  Géo-SIRENE…")
 
+        def _get(params):
+            import time
+            for attempt in range(4):
+                try:
+                    r = requests.get(base_url, params={**params, "per_page": 25}, timeout=60)
+                    r.raise_for_status()
+                    return r.json()
+                except Exception:
+                    if attempt == 3:
+                        raise
+                    time.sleep(2 ** attempt)  # 1s, 2s, 4s
+
+        def _extract_features(pages_data, mem_layer):
+            feats = []
+            seen_sirets = set()
+            for data in pages_data:
+                for enterprise in data.get("results", []):
+                    nom_unite = (
+                        enterprise.get("nom_raison_sociale")
+                        or enterprise.get("nom_complet")
+                        or ""
+                    ).strip()
+
+                    for etab in enterprise.get("matching_etablissements", []):
+                        if etab.get("etat_administratif") != "A":
+                            continue
+
+                        naf = etab.get("activite_principale") or ""
+                        if naf and naf[:2].isdigit() and int(naf[:2]) >= 97:
+                            continue
+
+                        lat = etab.get("latitude")
+                        lon = etab.get("longitude")
+                        if not lat or not lon:
+                            continue
+                        if lat == "[NON-DIFFUSIBLE]" or lon == "[NON-DIFFUSIBLE]":
+                            continue
+
+                        try:
+                            geom = QgsGeometry.fromPointXY(
+                                QgsPointXY(float(lon), float(lat))
+                            )
+                        except (ValueError, TypeError):
+                            continue
+
+                        enseignes = etab.get("liste_enseignes") or []
+                        nom = (
+                            (enseignes[0].strip() if enseignes else "")
+                            or (etab.get("nom_commercial") or "").strip()
+                            or nom_unite
+                        )
+                        if not nom:
+                            continue
+
+                        siret = etab.get("siret", "")
+                        if siret in seen_sirets:
+                            continue
+                        seen_sirets.add(siret)
+
+                        feat = QgsFeature(mem_layer.fields())
+                        feat.setGeometry(geom)
+                        feat.setAttribute("siret", siret)
+                        feat.setAttribute("nom", nom[:254])
+                        feat.setAttribute("activitePrincipaleEtablissement", naf)
+                        feat.setAttribute("adresse", (etab.get("adresse") or "").strip()[:254])
+                        feats.append(feat)
+            return feats
+
+        def _parallel_fetch(query_list):
+            """
+            query_list: list of (params_dict, page_int) tuples.
+            Returns list of response dicts in the same order as query_list.
+            Failed individual requests are skipped (logged) rather than aborting.
+            """
+            if not query_list:
+                return []
+            results = [None] * len(query_list)
+            errors = 0
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(_get, {**p, "page": pg}): i
+                    for i, (p, pg) in enumerate(query_list)
+                }
+                done = 0
+                total = len(futures)
+                for future in as_completed(futures):
+                    if feedback.isCanceled():
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return None
+                    try:
+                        results[futures[future]] = future.result()
+                    except Exception:
+                        errors += 1
+                    done += 1
+                    if done % 100 == 0:
+                        feedback.pushInfo(f"   … {done}/{total} requêtes")
+            if errors:
+                feedback.pushWarning(f"⚠  {errors} requête(s) échouée(s) — données partielles")
+            return results  # preserves positional order; some entries may be None
+
         try:
-            resp = requests.get(url, timeout=60)
-            resp.raise_for_status()
-
-            feedback.pushInfo(f"   📦  {len(resp.content) / 1024:.0f} Ko — filtrage…")
-
             # ── Couche mémoire point (EPSG:4326) ─────────────────────────────
             mem_layer = QgsVectorLayer("Point?crs=EPSG:4326", "SIRENE_raw", "memory")
             pr = mem_layer.dataProvider()
@@ -1533,94 +1637,73 @@ class FDPParCommune(QgsProcessingAlgorithm):
             )
             mem_layer.updateFields()
 
-            # ── Lecture du CSV ────────────────────────────────────────────────
-            # Les noms de colonnes sont normalisés en minuscules une seule fois.
-            # On pré-calcule les indices de chaque colonne utile pour éviter de
-            # reconstruire un dict(zip(headers, values)) à chaque ligne — le
-            # fichier SIRENE compte ~100 colonnes et potentiellement des dizaines
-            # de milliers de lignes pour les grandes villes.
-            reader = csv.reader(io.StringIO(resp.content.decode("utf-8")))
-            _col = {h.lower(): i for i, h in enumerate(next(reader))}
+            # ── Sonde initiale : page 1 sans filtre ───────────────────────────
+            base = {"code_commune": insee}
+            probe = _get({**base, "page": 1})
+            total_pages = probe.get("total_pages") or 1
+            feedback.pushInfo(
+                f"   📦  {probe.get('total_results', '?')} entreprises…"
+            )
 
-            def _v(row, name):
-                i = _col.get(name, -1)
-                return row[i] if 0 <= i < len(row) else ""
+            if feedback.isCanceled():
+                return None
 
-            features = []
+            if total_pages < 400:
+                # ── Commune normale : toutes les pages en une vague ───────────
+                rest = _parallel_fetch([(base, p) for p in range(2, total_pages + 1)])
+                if rest is None:
+                    return None
+                all_pages = [probe] + [d for d in rest if d is not None]
+            else:
+                # ── Commune dense : split section × entrepreneur individuel ───
+                # 17 sections × 2 types EI = 34 groupes mutuellement exclusifs,
+                # chacun avec son propre plafond de 10 000 entreprises.
+                feedback.pushInfo("   🔀  Commune dense — split par section NAF…")
 
-            for values in reader:
-                if feedback.isCanceled():
+                group_params = [
+                    {"code_commune": insee, "section_activite_principale": sec,
+                     "est_entrepreneur_individuel": ei}
+                    for sec in _SECTIONS
+                    for ei in ["true", "false"]
+                ]
+
+                # Phase 1 : page 1 de chaque groupe (34 requêtes en parallèle)
+                phase1 = _parallel_fetch([(gp, 1) for gp in group_params])
+                if phase1 is None:
                     return None
 
-                # ── Filtre 1 : établissements actifs uniquement ───────────────
-                if _v(values, "etatadministratifetablissement") != "A":
-                    continue
+                # Phase 2 : toutes les pages restantes en une seule vague
+                remaining = [
+                    (gp, p)
+                    for gp, first_page in zip(group_params, phase1)
+                    if first_page is not None
+                    for p in range(2, (first_page.get("total_pages") or 1) + 1)
+                ]
 
-                # ── Filtre 2 : exclure sections T et U ───────────────────────
-                # T (97-98) = ménages employeurs (famille avec employé de maison)
-                # U (99)    = activités extraterritoriales
-                # Ces codes ne correspondent pas à des entreprises au sens urbain.
-                naf = _v(values, "activiteprincipaleetablissement")
-                if naf and naf[:2].isdigit() and int(naf[:2]) >= 97:
-                    continue
-
-                # ── Filtre 3 : nom requis ─────────────────────────────────────
-                # Priorité : enseigne (nom sur la porte) > dénomination usuelle
-                # de l'établissement > dénomination de l'unité légale > nom/prénom
-                # pour les entrepreneurs individuels.
-                # Les entités sans aucun nom sont des holdings dormantes ou des
-                # erreurs d'enregistrement — on les écarte.
-                nom = (
-                    _v(values, "enseigne1etablissement").strip()
-                    or _v(values, "denominationusuelleetablissement").strip()
-                    or _v(values, "denominationunitelegale").strip()
-                    or " ".join(filter(None, [
-                        _v(values, "prenom1unitelegale").strip(),
-                        _v(values, "nomunitelegale").strip(),
-                    ])).strip()
+                n_capped = sum(
+                    1 for d in phase1
+                    if d is not None and (d.get("total_pages") or 1) == 400
                 )
-                if not nom:
-                    continue
+                if n_capped:
+                    feedback.pushWarning(
+                        f"⚠  {n_capped} groupe(s) toujours à la limite 10 000"
+                        " (H/M transport & services individuels très denses)"
+                    )
 
-                # ── Filtre 4 : qualité de géolocalisation ────────────────────
-                # geo_score < 0.4 = géocodage échoué, point placé au centroïde
-                # de la commune ou de la rue — position non fiable.
-                geo_score = _v(values, "geo_score")
-                if geo_score:
-                    try:
-                        if float(geo_score) < 0.4:
-                            continue
-                    except ValueError:
-                        pass  # valeur non numérique → on conserve
+                feedback.pushInfo(f"   🔄  {len(remaining)} pages supplémentaires…")
+                phase2 = _parallel_fetch(remaining) if remaining else []
+                if phase2 is None:
+                    return None
 
-                # ── Géométrie ────────────────────────────────────────────────
-                lat = _v(values, "latitude")
-                lon = _v(values, "longitude")
-                if not lat or not lon:
-                    continue
+                all_pages = (
+                    [d for d in phase1 if d is not None]
+                    + [d for d in phase2 if d is not None]
+                )
 
-                try:
-                    geom = QgsGeometry.fromPointXY(QgsPointXY(float(lon), float(lat)))
-                except (ValueError, TypeError):
-                    continue
+            if all_pages is None:
+                return None
 
-                # ── Adresse ──────────────────────────────────────────────────
-                adresse = " ".join(filter(None, [
-                    _v(values, "numerovoieetablissement"),
-                    _v(values, "indicerepetitionetablissement"),
-                    _v(values, "typevoieetablissement"),
-                    _v(values, "libellevoieetablissement"),
-                    _v(values, "codepostaletablissement"),
-                    _v(values, "libellecommuneetablissement"),
-                ]))
-
-                feat = QgsFeature(mem_layer.fields())
-                feat.setGeometry(geom)
-                feat.setAttribute("siret", _v(values, "siret"))
-                feat.setAttribute("nom", nom[:254])
-                feat.setAttribute("activitePrincipaleEtablissement", naf)
-                feat.setAttribute("adresse", adresse[:254])
-                features.append(feat)
+            features = _extract_features(all_pages, mem_layer)
 
             pr.addFeatures(features)
             mem_layer.updateExtents()

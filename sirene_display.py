@@ -177,7 +177,7 @@ def build_displaced_sirene_layer(
     # ── Étape 5 : construire la couche de sortie ───────────────────────────────
     out_layer = QgsVectorLayer(
         f"Point?crs={crs_id}",
-        "Établissements SIRENE (déplacés)",
+        "Établissements SIRENE",
         "memory",
     )
     pr = out_layer.dataProvider()

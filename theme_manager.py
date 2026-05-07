@@ -29,7 +29,7 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.core import QgsLayerTreeGroup, QgsProject
+from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject
 
 _SCOPE = "fdp_theme_manager"
 _KEY   = "state"
@@ -39,12 +39,27 @@ _KEY   = "state"
 # Helpers
 # =============================================================================
 
+def _collect_commune_groups(group, result):
+    """
+    Un groupe-commune a des QgsLayerTreeLayer en enfants directs.
+    Un groupe-lot n'a que des sous-groupes → on descend récursivement.
+    """
+    children = group.children()
+    if any(isinstance(c, QgsLayerTreeLayer) for c in children):
+        result.append(group)
+    else:
+        for child in children:
+            if isinstance(child, QgsLayerTreeGroup):
+                _collect_commune_groups(child, result)
+
+
 def _commune_groups():
-    """Nœuds groupe de premier niveau = groupes communes."""
-    return [
-        c for c in QgsProject.instance().layerTreeRoot().children()
-        if isinstance(c, QgsLayerTreeGroup)
-    ]
+    """Retourne tous les groupes-communes, quel que soit leur niveau d'imbrication."""
+    result = []
+    for child in QgsProject.instance().layerTreeRoot().children():
+        if isinstance(child, QgsLayerTreeGroup):
+            _collect_commune_groups(child, result)
+    return result
 
 
 def _find_child(qgs_node, name):
@@ -101,7 +116,7 @@ class ThemeManagerDock(QDockWidget):
     OBJECT_NAME = "fdp_theme_manager"
 
     def __init__(self, parent=None):
-        super().__init__("Thèmes cartographiques", parent)
+        super().__init__("Contrôle de visibilité", parent)
         self.setObjectName(self.OBJECT_NAME)
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
@@ -158,11 +173,18 @@ class ThemeManagerDock(QDockWidget):
         if not communes:
             return
 
-        self._tree.blockSignals(True)
-        self._tree.clear()
         union = _build_union_tree(communes)
-        self._populate(self._tree.invisibleRootItem(), union, (), communes)
-        self._tree.blockSignals(False)
+
+        self._tree.blockSignals(True)
+        try:
+            self._tree.clear()
+            self._populate(self._tree.invisibleRootItem(), union, (), communes)
+        except Exception as exc:
+            import traceback
+            print(f"[theme_manager] erreur lors de la construction de l'arbre :\n"
+                  f"{traceback.format_exc()}")
+        finally:
+            self._tree.blockSignals(False)
 
     def _populate(self, parent_item, union_dict, path, communes):
         for name, children in union_dict.items():
@@ -177,11 +199,12 @@ class ThemeManagerDock(QDockWidget):
             if cpath in self._state:
                 visible = self._state[cpath]
             else:
-                qgs_node = next(
-                    (n for c in communes if (n := _follow_path(c, cpath)) is not None),
-                    None,
-                )
-                visible = qgs_node.itemVisibilityChecked() if qgs_node else True
+                visible = True
+                for c in communes:
+                    node = _follow_path(c, cpath)
+                    if node is not None:
+                        visible = node.itemVisibilityChecked()
+                        break
 
             item.setCheckState(0, Qt.Checked if visible else Qt.Unchecked)
 
@@ -201,9 +224,11 @@ class ThemeManagerDock(QDockWidget):
         checked = state == Qt.Checked
 
         self._tree.blockSignals(True)
-        self._cascade_down(item, checked)
-        self._bubble_up(item.parent())
-        self._tree.blockSignals(False)
+        try:
+            self._cascade_down(item, checked)
+            self._bubble_up(item.parent())
+        finally:
+            self._tree.blockSignals(False)
 
         self._collect_state()
         self._apply_all()
@@ -266,8 +291,10 @@ class ThemeManagerDock(QDockWidget):
     def _set_all(self, visible):
         state = Qt.Checked if visible else Qt.Unchecked
         self._tree.blockSignals(True)
-        self._set_subtree(self._tree.invisibleRootItem(), state)
-        self._tree.blockSignals(False)
+        try:
+            self._set_subtree(self._tree.invisibleRootItem(), state)
+        finally:
+            self._tree.blockSignals(False)
         self._collect_state()
         self._apply_all()
         self._save_state()
@@ -311,9 +338,9 @@ class ThemeManagerDock(QDockWidget):
     # ── Signaux projet ────────────────────────────────────────────────────────
 
     def _connect_signals(self):
-        QgsProject.instance().layerTreeRoot().addedChildren.connect(
-            self._on_tree_changed
-        )
+        root = QgsProject.instance().layerTreeRoot()
+        root.addedChildren.connect(self._on_tree_changed)
+        root.removedChildren.connect(self._on_tree_changed)
         QgsProject.instance().cleared.connect(self._on_project_cleared)
         QgsProject.instance().readProject.connect(self._on_project_read)
 
@@ -324,14 +351,14 @@ class ThemeManagerDock(QDockWidget):
         self._refresh_and_apply()
 
     def _on_project_cleared(self, *_):
-        """Vide l'arbre et reconnecte addedChildren après ouverture d'un nouveau projet."""
+        """Vide l'arbre et reconnecte les signaux après ouverture d'un nouveau projet."""
         self._state.clear()
         self._tree.blockSignals(True)
         self._tree.clear()
         self._tree.blockSignals(False)
-        QgsProject.instance().layerTreeRoot().addedChildren.connect(
-            self._on_tree_changed
-        )
+        root = QgsProject.instance().layerTreeRoot()
+        root.addedChildren.connect(self._on_tree_changed)
+        root.removedChildren.connect(self._on_tree_changed)
 
     def _on_project_read(self, *_):
         """Charge l'état persisté après ouverture complète du projet."""
@@ -345,6 +372,79 @@ class ThemeManagerDock(QDockWidget):
 
 
 # =============================================================================
+# Auto-installation du hook de démarrage
+# =============================================================================
+
+def _install_startup_hook():
+    """
+    Écrit (une seule fois) un bloc dans startup.py du profil QGIS actif, de
+    sorte que le dock s'ouvre automatiquement à chaque lancement de QGIS.
+
+    Appelé automatiquement par ensure_theme_manager(). Requiert que ce module
+    soit importé normalement (pas via exec()) pour que __file__ soit défini.
+    Silencieux en cas d'erreur — ne bloque jamais QGIS.
+    """
+    import os
+    import pathlib
+
+    # __file__ n'est pas défini quand le script est chargé via exec() depuis
+    # la console QGIS. On abandonne sans bruit dans ce cas.
+    try:
+        tool_dir = str(pathlib.Path(__file__).parent.resolve())
+    except NameError:
+        return
+
+    try:
+        from qgis.core import QgsApplication
+        # qgisSettingsDirPath() retourne le dossier du profil actif, ex. :
+        # C:\Users\…\AppData\Roaming\QGIS\QGIS3\profiles\default\
+        profile_python = pathlib.Path(QgsApplication.qgisSettingsDirPath()) / "python"
+    except Exception:
+        profile_python = (
+            pathlib.Path(os.environ.get("APPDATA", ""))
+            / "QGIS" / "QGIS3" / "profiles" / "default" / "python"
+        )
+
+    try:
+        profile_python.mkdir(parents=True, exist_ok=True)
+        startup_path = profile_python / "startup.py"
+
+        MARKER = "# >>> fdp_theme_manager"
+        existing = startup_path.read_text(encoding="utf-8") if startup_path.exists() else ""
+        if MARKER in existing:
+            return  # Déjà installé
+
+        block = f"""
+{MARKER}
+import sys as _sys
+_fdp_tool_dir = r"{tool_dir}"
+if _fdp_tool_dir not in _sys.path:
+    _sys.path.insert(0, _fdp_tool_dir)
+
+from qgis.PyQt.QtCore import QTimer as _QTimer
+from qgis.core import QgsProject as _QgsProject
+
+def _fdp_open_hook(*_):
+    try:
+        from qgis.utils import iface as _i
+        if _i:
+            from theme_manager import ensure_theme_manager
+            ensure_theme_manager(_i)
+    except Exception:
+        pass
+
+_QgsProject.instance().readProject.connect(_fdp_open_hook)
+# Projet déjà ouvert au démarrage (restauration de session) : délai 1 s.
+_QTimer.singleShot(1000, lambda: _fdp_open_hook() if _QgsProject.instance().fileName() else None)
+# <<< fdp_theme_manager
+"""
+        sep = "\n\n" if existing.strip() else ""
+        startup_path.write_text(existing + sep + block, encoding="utf-8")
+    except Exception:
+        pass  # Ne jamais bloquer QGIS
+
+
+# =============================================================================
 # Point d'entrée public
 # =============================================================================
 
@@ -353,6 +453,9 @@ def ensure_theme_manager(iface):
     Crée le dock s'il n'existe pas encore, ou le retrouve s'il a déjà été
     créé dans la session courante. Idempotent — sûr à appeler à chaque
     exécution du script Processing.
+
+    Installe aussi silencieusement le hook startup.py pour que le dock
+    s'ouvre automatiquement à tous les prochains lancements de QGIS.
     """
     main_win = iface.mainWindow()
     existing = main_win.findChild(QDockWidget, ThemeManagerDock.OBJECT_NAME)
@@ -363,8 +466,10 @@ def ensure_theme_manager(iface):
         else:
             existing.show()
             existing.raise_()
+            _install_startup_hook()
             return existing
     dock = ThemeManagerDock(main_win)
     iface.addDockWidget(Qt.RightDockWidgetArea, dock)
     dock.show()
+    _install_startup_hook()
     return dock
