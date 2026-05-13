@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import tempfile
+import time
 import traceback
 
 import processing
@@ -32,10 +33,13 @@ from qgis.core import (
     QgsProcessingContext,
     QgsProcessingParameterString,
     QgsProject,
+    QgsProperty,
     QgsRasterLayer,
     QgsRuleBasedRenderer,
     QgsSimpleLineSymbolLayer,
     QgsSingleSymbolRenderer,
+    QgsSymbolLayer,
+    QgsUnitTypes,
     QgsVectorLayer,
 )
 from qgis.gui import QgsColorButton
@@ -1098,6 +1102,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         # se retrouve à l'index 0 (sommet = rendu par-dessus).
         root = QgsProject.instance().layerTreeRoot()
         group = root.insertGroup(0, nom)
+        group.setCustomProperty("fdp_insee", insee)
 
         # Topographie : ajoutée en premier enfant → position 0 = sommet de la légende.
         # Ordre dans le groupe : courbes au-dessus, hillshade en-dessous (Multiply).
@@ -1484,6 +1489,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         # invalides (auto-intersections, doublons de sommets…). On passe un
         # QgsProcessingContext avec GeometrySkipInvalid pour que native:clip
         # ignore ces entités au lieu d'interrompre le traitement.
+        layer.dataProvider().createSpatialIndex()
         clip_ctx = QgsProcessingContext()
         clip_ctx.setInvalidGeometryCheck(QgsFeatureRequest.GeometrySkipInvalid)
         clipped = processing.run(
@@ -1507,246 +1513,213 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback,
     ):
         """
-        Télécharge les établissements SIRENE via l'API recherche-entreprises.
-        Remplace le service files.data.gouv.fr/geo-sirene décommissionné en avril 2026.
-
-        Pour les communes dépassant 10 000 entreprises (cap API), les requêtes sont
-        automatiquement découpées par section NAF × statut entrepreneur individuel
-        (34 groupes mutuellement exclusifs), puis toutes les pages de tous les groupes
-        sont récupérées en parallèle en une seule vague.
+        Charge les établissements SIRENE depuis un cache local du fichier national INSEE
+        (StockEtablissement, ~2 Go parquet). Le fichier est téléchargé une fois et mis
+        en cache 35 jours dans ~/.sirene/. Chaque import filtre localement par commune —
+        pas d'appels API, pas de limite, pas de risque de throttling.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import pyarrow.parquet as pq
 
-        # Sections NAF actives (T=97-98 ménages employeurs, U=99 extraterritorial exclus)
-        _SECTIONS = list("ABCDEFGHIJKLMNOPQRS")
+        _URL = (
+            "https://object.files.data.gouv.fr/data-pipeline-open/siren/stock/"
+            "StockEtablissement_utf8.parquet"
+        )
+        _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".sirene")
+        _CACHE_FILE = os.path.join(_CACHE_DIR, "StockEtablissement.parquet")
+        _MAX_AGE = 35 * 24 * 3600  # 35 jours — INSEE met à jour mensuellement
 
-        base_url = "https://recherche-entreprises.api.gouv.fr/search"
-        feedback.pushInfo(f"   ⬇  Géo-SIRENE…")
+        _COLS = [
+            "siret",
+            "codeCommuneEtablissement",
+            "etatAdministratifEtablissement",
+            "activitePrincipaleEtablissement",
+            "enseigne1Etablissement",
+            "denominationUsuelleEtablissement",
+            "coordonneeLambertAbscisseEtablissement",
+            "coordonneeLambertOrdonneeEtablissement",
+            "numeroVoieEtablissement",
+            "indiceRepetitionEtablissement",
+            "typeVoieEtablissement",
+            "libelleVoieEtablissement",
+            "codePostalEtablissement",
+            "libelleCommuneEtablissement",
+        ]
 
-        def _get(params):
-            import time
-            for attempt in range(4):
-                try:
-                    r = requests.get(base_url, params={**params, "per_page": 25}, timeout=60)
+        # ── Cache : téléchargement si absent ou périmé ────────────────────────
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        needs_dl = (
+            not os.path.exists(_CACHE_FILE)
+            or (time.time() - os.path.getmtime(_CACHE_FILE)) > _MAX_AGE
+        )
+
+        if needs_dl:
+            feedback.pushInfo("   ⬇  Téléchargement StockEtablissement INSEE (~2 Go)…")
+            feedback.pushInfo("      (opération unique — fichier mis en cache 35 jours)")
+            tmp = _CACHE_FILE + ".tmp"
+            try:
+                with requests.get(_URL, stream=True, timeout=300) as r:
                     r.raise_for_status()
-                    return r.json()
-                except Exception:
-                    if attempt == 3:
-                        raise
-                    time.sleep(2 ** attempt)  # 1s, 2s, 4s
+                    total = int(r.headers.get("content-length", 0))
+                    done = 0
+                    with open(tmp, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=4 * 1024 * 1024):
+                            if feedback.isCanceled():
+                                os.remove(tmp)
+                                return None
+                            f.write(chunk)
+                            done += len(chunk)
+                            if total and done % (200 * 1024 * 1024) < 4 * 1024 * 1024:
+                                feedback.pushInfo(
+                                    f"      {done // (1024*1024)} Mo"
+                                    f" / {total // (1024*1024)} Mo"
+                                )
+                os.replace(tmp, _CACHE_FILE)
+                feedback.pushInfo("   ✓  Cache SIRENE mis à jour")
+            except Exception as e:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                feedback.reportError(
+                    f"SIRENE — téléchargement impossible : {e}", fatalError=False
+                )
+                return None
 
-        def _extract_features(pages_data, mem_layer):
-            feats = []
-            seen_sirets = set()
-            for data in pages_data:
-                for enterprise in data.get("results", []):
-                    nom_unite = (
-                        enterprise.get("nom_raison_sociale")
-                        or enterprise.get("nom_complet")
-                        or ""
-                    ).strip()
+        # ── Paris / Lyon / Marseille : les établissements sont stockés sous les
+        #    codes arrondissement, pas sous le code commune parent.
+        _PLM = {
+            "75056": ([f"751{str(i).zfill(2)}" for i in range(1, 21)],
+                      "Paris", "~1 000 000", "20–40 min"),
+            "69123": (["6938" + str(i) for i in range(1, 10)],
+                      "Lyon",  "~550 000",  "5–15 min"),
+            "13055": ([f"132{str(i).zfill(2)}" for i in range(1, 17)],
+                      "Marseille", "~300 000", "10–20 min"),
+        }
+        if insee in _PLM:
+            arr_codes, city_name, est_count, est_time = _PLM[insee]
+            reply = QMessageBox.warning(
+                None,
+                f"Import {city_name} — ville entière",
+                f"Vous importez {city_name} en tant que commune entière.\n\n"
+                f"Cela représente environ {est_count} établissements répartis sur "
+                f"{len(arr_codes)} arrondissements.\n\n"
+                f"Le traitement (appariement bâtiments + déplacement) prendra "
+                f"environ {est_time}.\n\n"
+                f"Pour un import rapide, relancez en cherchant directement "
+                f"l'arrondissement (ex. « {city_name} 3e »).\n\n"
+                f"Continuer quand même ?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                feedback.pushInfo("   Import SIRENE annulé par l'utilisateur.")
+                return None
+            insee_codes = arr_codes
+        else:
+            insee_codes = [insee]
 
-                    for etab in enterprise.get("matching_etablissements", []):
-                        if etab.get("etat_administratif") != "A":
-                            continue
-
-                        naf = etab.get("activite_principale") or ""
-                        if naf and naf[:2].isdigit() and int(naf[:2]) >= 97:
-                            continue
-
-                        lat = etab.get("latitude")
-                        lon = etab.get("longitude")
-                        if not lat or not lon:
-                            continue
-                        if lat == "[NON-DIFFUSIBLE]" or lon == "[NON-DIFFUSIBLE]":
-                            continue
-
-                        try:
-                            geom = QgsGeometry.fromPointXY(
-                                QgsPointXY(float(lon), float(lat))
-                            )
-                        except (ValueError, TypeError):
-                            continue
-
-                        enseignes = etab.get("liste_enseignes") or []
-                        nom = (
-                            (enseignes[0].strip() if enseignes else "")
-                            or (etab.get("nom_commercial") or "").strip()
-                            or nom_unite
-                        )
-                        if not nom:
-                            continue
-
-                        siret = etab.get("siret", "")
-                        if siret in seen_sirets:
-                            continue
-                        seen_sirets.add(siret)
-
-                        feat = QgsFeature(mem_layer.fields())
-                        feat.setGeometry(geom)
-                        feat.setAttribute("siret", siret)
-                        feat.setAttribute("nom", nom[:254])
-                        feat.setAttribute("activitePrincipaleEtablissement", naf)
-                        feat.setAttribute("adresse", (etab.get("adresse") or "").strip()[:254])
-                        feats.append(feat)
-            return feats
-
-        def _parallel_fetch(query_list):
-            """
-            query_list: list of (params_dict, page_int) tuples.
-            Returns list of response dicts in the same order as query_list.
-            Failed individual requests are skipped (logged) rather than aborting.
-            """
-            if not query_list:
-                return []
-            results = [None] * len(query_list)
-            errors = 0
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = {
-                    executor.submit(_get, {**p, "page": pg}): i
-                    for i, (p, pg) in enumerate(query_list)
-                }
-                done = 0
-                total = len(futures)
-                for future in as_completed(futures):
-                    if feedback.isCanceled():
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        return None
-                    try:
-                        results[futures[future]] = future.result()
-                    except Exception:
-                        errors += 1
-                    done += 1
-                    if done % 100 == 0:
-                        feedback.pushInfo(f"   … {done}/{total} requêtes")
-            if errors:
-                feedback.pushWarning(f"⚠  {errors} requête(s) échouée(s) — données partielles")
-            return results  # preserves positional order; some entries may be None
-
+        # ── Lecture parquet + filtre commune ─────────────────────────────────
+        label = insee if len(insee_codes) == 1 else f"{insee_codes[0]}–{insee_codes[-1]}"
+        feedback.pushInfo(f"   🔍  Filtrage SIRENE commune {label}…")
         try:
-            # ── Couche mémoire point (EPSG:4326) ─────────────────────────────
-            mem_layer = QgsVectorLayer("Point?crs=EPSG:4326", "SIRENE_raw", "memory")
-            pr = mem_layer.dataProvider()
-            pr.addAttributes(
-                [
-                    QgsField("siret", QMetaType.Type.QString),
-                    QgsField("nom", QMetaType.Type.QString),
-                    QgsField("activitePrincipaleEtablissement", QMetaType.Type.QString),
-                    QgsField("adresse", QMetaType.Type.QString),
+            if len(insee_codes) == 1:
+                pq_filters = [
+                    ("codeCommuneEtablissement", "=", insee_codes[0]),
+                    ("etatAdministratifEtablissement", "=", "A"),
                 ]
-            )
-            mem_layer.updateFields()
-
-            # ── Sonde initiale : page 1 sans filtre ───────────────────────────
-            base = {"code_commune": insee}
-            probe = _get({**base, "page": 1})
-            total_pages = probe.get("total_pages") or 1
-            feedback.pushInfo(
-                f"   📦  {probe.get('total_results', '?')} entreprises…"
-            )
-
-            if feedback.isCanceled():
-                return None
-
-            if total_pages < 400:
-                # ── Commune normale : toutes les pages en une vague ───────────
-                rest = _parallel_fetch([(base, p) for p in range(2, total_pages + 1)])
-                if rest is None:
-                    return None
-                all_pages = [probe] + [d for d in rest if d is not None]
             else:
-                # ── Commune dense : split section × entrepreneur individuel ───
-                # 17 sections × 2 types EI = 34 groupes mutuellement exclusifs,
-                # chacun avec son propre plafond de 10 000 entreprises.
-                feedback.pushInfo("   🔀  Commune dense — split par section NAF…")
-
-                group_params = [
-                    {"code_commune": insee, "section_activite_principale": sec,
-                     "est_entrepreneur_individuel": ei}
-                    for sec in _SECTIONS
-                    for ei in ["true", "false"]
+                pq_filters = [
+                    ("codeCommuneEtablissement", "in", insee_codes),
+                    ("etatAdministratifEtablissement", "=", "A"),
                 ]
-
-                # Phase 1 : page 1 de chaque groupe (34 requêtes en parallèle)
-                phase1 = _parallel_fetch([(gp, 1) for gp in group_params])
-                if phase1 is None:
-                    return None
-
-                # Phase 2 : toutes les pages restantes en une seule vague
-                remaining = [
-                    (gp, p)
-                    for gp, first_page in zip(group_params, phase1)
-                    if first_page is not None
-                    for p in range(2, (first_page.get("total_pages") or 1) + 1)
-                ]
-
-                n_capped = sum(
-                    1 for d in phase1
-                    if d is not None and (d.get("total_pages") or 1) == 400
-                )
-                if n_capped:
-                    feedback.pushWarning(
-                        f"⚠  {n_capped} groupe(s) toujours à la limite 10 000"
-                        " (H/M transport & services individuels très denses)"
-                    )
-
-                feedback.pushInfo(f"   🔄  {len(remaining)} pages supplémentaires…")
-                phase2 = _parallel_fetch(remaining) if remaining else []
-                if phase2 is None:
-                    return None
-
-                all_pages = (
-                    [d for d in phase1 if d is not None]
-                    + [d for d in phase2 if d is not None]
-                )
-
-            if all_pages is None:
-                return None
-
-            features = _extract_features(all_pages, mem_layer)
-
-            pr.addFeatures(features)
-            mem_layer.updateExtents()
-            feedback.pushInfo(f"   ✓  {len(features)} établissement(s)")
-
-            if not features:
-                feedback.pushWarning("⚠  Aucun établissement localisé sur la commune")
-                return None
-
-            # ── Reprojection EPSG:4326 → EPSG:2154 ───────────────────────────
-            reprojected = processing.run(
-                "native:reprojectlayer",
-                {
-                    "INPUT": mem_layer,
-                    "TARGET_CRS": crs_2154,
-                    "OUTPUT": "memory:",
-                },
-            )["OUTPUT"]
-
-            # ── Découpage sur le contour communal ─────────────────────────────
-            clipped = processing.run(
-                "native:clip",
-                {
-                    "INPUT": reprojected,
-                    "OVERLAY": boundary_layer,
-                    "OUTPUT": "memory:",
-                },
-            )["OUTPUT"]
-
-            clipped.setName("Établissements SIRENE")
-            return clipped
-
-        except requests.HTTPError as e:
-            feedback.pushWarning(
-                f"⚠  SIRENE : données indisponibles pour la commune {insee}"
+            table = pq.read_table(
+                _CACHE_FILE,
+                columns=_COLS,
+                filters=pq_filters,
             )
-            return None
         except Exception as e:
             feedback.reportError(
-                f"SIRENE — erreur inattendue : {e}\n{traceback.format_exc()}",
+                f"SIRENE — lecture cache : {e}\n{traceback.format_exc()}",
                 fatalError=False,
             )
             return None
+
+        # ── Colonnes en listes Python pour itération rapide ──────────────────
+        sirets     = table["siret"].to_pylist()
+        nafs       = table["activitePrincipaleEtablissement"].to_pylist()
+        enseignes  = table["enseigne1Etablissement"].to_pylist()
+        denoms     = table["denominationUsuelleEtablissement"].to_pylist()
+        xs         = table["coordonneeLambertAbscisseEtablissement"].to_pylist()
+        ys         = table["coordonneeLambertOrdonneeEtablissement"].to_pylist()
+        nums       = table["numeroVoieEtablissement"].to_pylist()
+        reps       = table["indiceRepetitionEtablissement"].to_pylist()
+        types_voie = table["typeVoieEtablissement"].to_pylist()
+        libelles   = table["libelleVoieEtablissement"].to_pylist()
+        cps        = table["codePostalEtablissement"].to_pylist()
+        communes   = table["libelleCommuneEtablissement"].to_pylist()
+
+        # ── Couche mémoire EPSG:2154 (coordonnées Lambert déjà en L93) ───────
+        mem_layer = QgsVectorLayer("Point?crs=EPSG:2154", "SIRENE_raw", "memory")
+        pr = mem_layer.dataProvider()
+        pr.addAttributes(
+            [
+                QgsField("siret", QMetaType.Type.QString),
+                QgsField("nom", QMetaType.Type.QString),
+                QgsField("activitePrincipaleEtablissement", QMetaType.Type.QString),
+                QgsField("adresse", QMetaType.Type.QString),
+            ]
+        )
+        mem_layer.updateFields()
+
+        features = []
+        for i in range(len(sirets)):
+            # ── Filtre : exclure sections T (97-98) et U (99) ────────────────
+            naf = nafs[i] or ""
+            if naf and naf[:2].isdigit() and int(naf[:2]) >= 97:
+                continue
+
+            # ── Coordonnées Lambert 93 ────────────────────────────────────────
+            x, y = xs[i], ys[i]
+            if not x or not y:
+                continue
+            try:
+                xf, yf = float(x), float(y)
+            except (ValueError, TypeError):
+                continue
+            if xf <= 0 or yf <= 0:
+                continue
+
+            # ── Nom ───────────────────────────────────────────────────────────
+            nom = (enseignes[i] or "").strip() or (denoms[i] or "").strip()
+            if not nom:
+                continue
+
+            adresse = " ".join(
+                filter(None, [nums[i], reps[i], types_voie[i], libelles[i], cps[i], communes[i]])
+            ).strip()
+
+            feat = QgsFeature(mem_layer.fields())
+            feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(xf, yf)))
+            feat.setAttribute("siret", sirets[i] or "")
+            feat.setAttribute("nom", nom[:254])
+            feat.setAttribute("activitePrincipaleEtablissement", naf)
+            feat.setAttribute("adresse", adresse[:254])
+            features.append(feat)
+
+        pr.addFeatures(features)
+        mem_layer.updateExtents()
+        feedback.pushInfo(f"   ✓  {len(features)} établissement(s)")
+
+        if not features:
+            feedback.pushWarning("⚠  Aucun établissement localisé sur la commune")
+            return None
+
+        # ── Découpage sur le contour communal (déjà en EPSG:2154) ────────────
+        mem_layer.dataProvider().createSpatialIndex()
+        clipped = processing.run(
+            "native:clip",
+            {"INPUT": mem_layer, "OVERLAY": boundary_layer, "OUTPUT": "memory:"},
+        )["OUTPUT"]
+        clipped.setName("Établissements SIRENE")
+        return clipped
 
     # =========================================================================
     # Helpers – symbologie
@@ -2091,6 +2064,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
             feedback.pushWarning("   ⚠  Courbes de niveau invalides.")
             return None, hillshade_rl
 
+        raw.dataProvider().createSpatialIndex()
         clip_ctx = QgsProcessingContext()
         clip_ctx.setInvalidGeometryCheck(QgsFeatureRequest.GeometrySkipInvalid)
         clipped = processing.run(
@@ -2250,18 +2224,37 @@ class FDPParCommune(QgsProcessingAlgorithm):
             ),
         ]
 
-        root_rule = QgsRuleBasedRenderer.Rule(None)
+        # Déplacement data-défini : présent quand la couche vient de
+        # build_displaced_sirene_layer (champs offset_x_mm / offset_y_mm).
+        field_names   = [f.name() for f in layer.fields()]
+        use_dd_offset = "offset_x_m" in field_names
 
-        for label, ranges, color, size, shape, custom_expr in groups:
+        def _make_sym(color, size, shape):
             sym = QgsMarkerSymbol.createSimple(
                 {
-                    "color": color,
-                    "name": shape,
-                    "size": str(size),
+                    "color":         color,
+                    "name":          shape,
+                    "size":          str(size),
                     "outline_style": "no",
                 }
             )
-            rule = QgsRuleBasedRenderer.Rule(sym)
+            if use_dd_offset:
+                sl = sym.symbolLayer(0)
+                # Offset en unités carte (mètres EPSG:2154) → le cercle grandit
+                # naturellement avec le zoom, épousant l'échelle des bâtiments.
+                sl.setOffsetUnit(QgsUnitTypes.RenderMapUnits)
+                sl.setDataDefinedProperty(
+                    QgsSymbolLayer.Property.PropertyOffset,
+                    QgsProperty.fromExpression(
+                        'array("offset_x_m", "offset_y_m")'
+                    ),
+                )
+            return sym
+
+        root_rule = QgsRuleBasedRenderer.Rule(None)
+
+        for label, ranges, color, size, shape, custom_expr in groups:
+            rule = QgsRuleBasedRenderer.Rule(_make_sym(color, size, shape))
             rule.setFilterExpression(
                 custom_expr if custom_expr is not None else self._naf_div_expr(ranges)
             )
@@ -2269,15 +2262,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
             root_rule.appendChild(rule)
 
         # Règle de repli (codes absents, malformés ou NAF inconnu)
-        other_sym = QgsMarkerSymbol.createSimple(
-            {
-                "color": "#BBBBBB",
-                "name": "circle",
-                "size": "1.5",
-                "outline_style": "no",
-            }
-        )
-        other_rule = QgsRuleBasedRenderer.Rule(other_sym)
+        other_rule = QgsRuleBasedRenderer.Rule(_make_sym("#BBBBBB", 1.5, "circle"))
         other_rule.setFilterExpression("ELSE")
         other_rule.setLabel("Activité non classée")
         root_rule.appendChild(other_rule)

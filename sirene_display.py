@@ -3,8 +3,8 @@
 sirene_display.py — Déplacement visuel des points SIRENE autour du centroïde bâtiment
 
 Expose :
-    RADIUS_M            float  — rayon minimum du cercle (mètres, EPSG:2154)
-    RADIUS_PER_POINT_M  float  — mètres supplémentaires par point dans un groupe
+    RADIUS_MM           float  — rayon écran minimum du cercle (mm)
+    RADIUS_PER_POINT_MM float  — mm supplémentaires par point dans un groupe (≥8 pts)
     build_displaced_sirene_layer(sirene_layer, buildings_layer, feedback)
         -> QgsVectorLayer
 
@@ -13,10 +13,12 @@ Logique :
      (ou le plus proche ≤ 30 m). Sans bâtiment proche : position d'origine conservée.
   2. Déduplication : un seul point par catégorie NAF par centroïde.
      Un bâtiment avec 10 commerces et 3 restaurants → 2 points, pas 13.
-  3. Les points partageant un centroïde sont répartis en cercle autour de celui-ci,
-     leurs coordonnées EPSG:2154 finales calculées directement.
-     Max 12-13 points par bâtiment → rayon max ~20 m, soit ≤ 10 mm à 1:2000.
-  4. Renderer règle-par-règle simple — aucune dépendance aux APIs renderer avancées.
+  3. Chaque point reçoit des champs offset_x_mm / offset_y_mm calculés en mm écran
+     (RADIUS_MM = 4 mm, constant quelle que soit l'échelle de la carte).
+     La géométrie reste à l'ancre ; le déplacement visuel est rendu via une
+     propriété data-définie sur le symbole, appliquée par _apply_sirene_style.
+  4. L'appel à _apply_sirene_style (dans fdp_par_commune.py) détecte le champ
+     offset_x_mm et ajoute automatiquement le PropertyOffset data-défini.
 """
 
 import importlib.util
@@ -25,17 +27,15 @@ import os
 
 from qgis.core import (
     QgsFeature,
+    QgsField,
     QgsGeometry,
-    QgsMarkerSymbol,
     QgsPointXY,
-    QgsRuleBasedRenderer,
     QgsSpatialIndex,
     QgsVectorLayer,
 )
+from qgis.PyQt.QtCore import QMetaType
 
 # Charger SIRENE_CATEGORIES depuis sirene_buildings.py.
-# Les scripts Processing n'ont pas de __package__, donc on utilise importlib
-# avec le chemin absolu — même pattern que fdp_par_commune.py.
 _sb_spec = importlib.util.spec_from_file_location(
     "sirene_buildings",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_buildings.py"),
@@ -43,29 +43,15 @@ _sb_spec = importlib.util.spec_from_file_location(
 _sb_mod = importlib.util.module_from_spec(_sb_spec)
 _sb_spec.loader.exec_module(_sb_mod)
 SIRENE_CATEGORIES = _sb_mod.SIRENE_CATEGORIES
-_category_index   = _sb_mod._category_index   # évite la duplication de la logique NAF
+_category_index   = _sb_mod._category_index
 del _sb_spec, _sb_mod
 
 # =============================================================================
 # Constantes publiques
 # =============================================================================
 
-RADIUS_M           = 8.0   # rayon minimum (mètres EPSG:2154) — 4 mm à 1:2000
+RADIUS_M           = 8.0   # rayon minimum en mètres EPSG:2154 — 4 mm à 1:2000
 RADIUS_PER_POINT_M = 1.5   # mètres supplémentaires par point dans un groupe
-
-# =============================================================================
-# Helpers privés
-# =============================================================================
-
-_CATCHALL_IDX = len(SIRENE_CATEGORIES) - 1
-
-
-def _naf_div_expr(ranges: list) -> str:
-    """Expression QGIS filtrant par plages de divisions NAF."""
-    field   = 'to_int(left("activitePrincipaleEtablissement", 2))'
-    clauses = [f"({field} BETWEEN {lo} AND {hi})" for lo, hi in ranges]
-    return " OR ".join(clauses) if clauses else "FALSE"
-
 
 # =============================================================================
 # Fonction publique
@@ -78,8 +64,13 @@ def build_displaced_sirene_layer(
     feedback,
 ) -> QgsVectorLayer:
     """
-    Retourne une couche Point mémoire avec coordonnées finales déplacées.
-    Voir module docstring pour la logique complète.
+    Retourne une couche Point mémoire avec :
+      - géométrie = centroïde du bâtiment apparié (ou coords SIRENE d'origine)
+      - champs offset_x_mm / offset_y_mm encodant le déplacement circulaire
+      - champ category_index pour le tri légende
+
+    Le renderer est appliqué par _apply_sirene_style (fdp_par_commune.py) qui
+    détecte offset_x_mm et ajoute automatiquement le PropertyOffset data-défini.
     """
     crs_id   = sirene_layer.crs().authid()
     BUFFER_M = 30.0
@@ -128,8 +119,7 @@ def build_displaced_sirene_layer(
         point_to_anchor[feat.id()] = matched_centroid
 
     # ── Étape 3 : déduplication (un point par catégorie par ancre) ────────────
-    # Clé = (anchor_key, category_index). On garde le premier représentant trouvé.
-    # Résultat : au plus len(SIRENE_CATEGORIES) ≈ 13 points par bâtiment.
+    # Clé = (anchor_key, category_index). 2 décimales suffisent en EPSG:2154 (cm).
     seen    = {}   # (anchor_key, cat_idx) → (QgsPointXY anchor, attributes)
     n_input = 0
 
@@ -138,7 +128,7 @@ def build_displaced_sirene_layer(
         naf     = src_feat["activitePrincipaleEtablissement"] or ""
         cat_idx = _category_index(naf)
         anchor  = point_to_anchor[src_feat.id()]
-        key     = (f"{anchor.x():.3f},{anchor.y():.3f}", cat_idx)
+        key     = (f"{anchor.x():.2f},{anchor.y():.2f}", cat_idx)
         if key not in seen:
             seen[key] = (anchor, src_feat.attributes())
 
@@ -146,18 +136,20 @@ def build_displaced_sirene_layer(
         f"  {n_input} établissement(s) → {len(seen)} point(s) après déduplication."
     )
 
-    # ── Étape 4 : grouper par ancre et calculer les positions déplacées ────────
-    # anchor_key → [(cat_idx, anchor, attributes), ...]
+    # ── Étape 4 : grouper par ancre ───────────────────────────────────────────
     anchor_groups = {}
     for (anchor_key, cat_idx), (anchor, attrs) in seen.items():
         anchor_groups.setdefault(anchor_key, []).append((cat_idx, anchor, attrs))
 
-    # Trier par cat_idx → disposition horaire dans l'ordre de la légende
     for key in anchor_groups:
         anchor_groups[key].sort(key=lambda t: t[0])
 
-    # Calculer la géométrie finale de chaque point
-    displaced = []   # liste de (QgsGeometry, attributes)
+    # ── Étape 5 : calculer les offsets en mètres EPSG:2154 ────────────────────
+    # Géométrie = ancre ; déplacement = offset_x_m / offset_y_m en mètres CRS.
+    # Rayon en mètres → le cercle grandit naturellement quand on zoome (4 mm à
+    # 1:2000, 16 mm à 1:500), ce qui épouse l'échelle des emprises bâties.
+    displaced = []   # (anchor QgsPointXY, attrs list, ox_m, oy_m, cat_idx)
+
     for entries in anchor_groups.values():
         n      = len(entries)
         anchor = entries[0][1]
@@ -165,101 +157,40 @@ def build_displaced_sirene_layer(
 
         for i, (cat_idx, _anchor, attrs) in enumerate(entries):
             if n == 1:
-                geom = QgsGeometry.fromPointXY(anchor)
+                ox, oy = 0.0, 0.0
             else:
-                # Départ au nord (π/2) puis sens horaire
                 angle = math.pi / 2 - (2 * math.pi * i / n)
-                x = anchor.x() + radius * math.cos(angle)
-                y = anchor.y() + radius * math.sin(angle)
-                geom = QgsGeometry.fromPointXY(QgsPointXY(x, y))
-            displaced.append((geom, attrs))
+                ox = radius * math.cos(angle)
+                oy = radius * math.sin(angle)
+            displaced.append((anchor, attrs, ox, oy, cat_idx))
 
-    # ── Étape 5 : construire la couche de sortie ───────────────────────────────
+    # ── Étape 6 : construire la couche de sortie ───────────────────────────────
     out_layer = QgsVectorLayer(
         f"Point?crs={crs_id}",
         "Établissements SIRENE",
         "memory",
     )
     pr = out_layer.dataProvider()
-    pr.addAttributes(sirene_layer.fields().toList())
+    base_fields = sirene_layer.fields().toList()
+    pr.addAttributes(base_fields + [
+        QgsField("offset_x_m",     QMetaType.Type.Double),
+        QgsField("offset_y_m",     QMetaType.Type.Double),
+        QgsField("category_index", QMetaType.Type.Int),
+    ])
     out_layer.updateFields()
 
     new_features = []
-    for geom, attrs in displaced:
+    n_base = len(base_fields)
+    for anchor, attrs, ox, oy, cat_idx in displaced:
         new_feat = QgsFeature(out_layer.fields())
-        new_feat.setGeometry(geom)
-        new_feat.setAttributes(attrs)
+        new_feat.setGeometry(QgsGeometry.fromPointXY(anchor))
+        # attrs may be shorter than n_base if the source layer had extra fields
+        padded = list(attrs) + [None] * max(0, n_base - len(attrs))
+        new_feat.setAttributes(padded + [ox, oy, cat_idx])
         new_features.append(new_feat)
 
     pr.addFeatures(new_features)
     out_layer.updateExtents()
 
-    # ── Étape 6 : renderer règle-par-règle simple ─────────────────────────────
-    # Pas de propriétés data-définies ni de renderer avancé — le déplacement est
-    # dans la géométrie. Doit rester synchronisé avec _apply_sirene_style dans
-    # fdp_par_commune.py.
-
-    _FORMATION_CODES = "'85.51Z','85.52Z','85.53Z','85.59A','85.59B','85.60Z'"
-    _div             = 'to_int(left("activitePrincipaleEtablissement", 2))'
-
-    groups = [
-        ("Commerce",                              [(45, 47)],                     "#F4A261", 3.0, "circle",     None),
-        ("Restauration & hébergement",            [(55, 56)],                     "#E63946", 3.0, "square",     None),
-        ("Santé & action sociale",                [(86, 88)],                     "#06D6A0", 3.0, "diamond",    None),
-        (
-            "Éducation",
-            [(85, 85)],
-            "#FFD166",
-            3.0,
-            "triangle",
-            f'({_div} = 85) AND "activitePrincipaleEtablissement" NOT IN ({_FORMATION_CODES})',
-        ),
-        (
-            "Formation",
-            [],
-            "#B8A000",
-            3.0,
-            "star",
-            f'"activitePrincipaleEtablissement" IN ({_FORMATION_CODES})',
-        ),
-        ("Équipements & services publics",        [(84, 84)],                     "#C1121F", 3.0, "pentagon",   None),
-        ("Culture, sport & loisirs",              [(90, 93)],                     "#118AB2", 3.0, "hexagon",    None),
-        ("Services aux personnes & associations", [(94, 96)],                     "#F48FB1", 2.5, "cross_fill", None),
-        ("Bureaux & services tertiaires",         [(58, 66), (68, 75), (77, 82)], "#7B2D8B", 2.5, "circle",    None),
-        ("Industrie, artisanat & construction",   [(5, 9), (10, 43)],             "#8B5E3C", 2.5, "square",    None),
-        ("Transport & logistique",                [(49, 53)],                     "#6C757D", 2.5, "diamond",   None),
-        ("Agriculture, sylviculture & pêche",     [(1, 3)],                       "#2D6A4F", 2.5, "triangle",  None),
-    ]
-
-    root_rule = QgsRuleBasedRenderer.Rule(None)
-
-    for label, ranges, color, size, shape, custom_expr in groups:
-        sym = QgsMarkerSymbol.createSimple({
-            "color":         color,
-            "name":          shape,
-            "size":          str(size),
-            "outline_style": "no",
-        })
-        rule = QgsRuleBasedRenderer.Rule(sym)
-        rule.setFilterExpression(
-            custom_expr if custom_expr is not None else _naf_div_expr(ranges)
-        )
-        rule.setLabel(label)
-        root_rule.appendChild(rule)
-
-    other_sym = QgsMarkerSymbol.createSimple({
-        "color":         "#BBBBBB",
-        "name":          "circle",
-        "size":          "1.5",
-        "outline_style": "no",
-    })
-    other_rule = QgsRuleBasedRenderer.Rule(other_sym)
-    other_rule.setFilterExpression("ELSE")
-    other_rule.setLabel("Activité non classée")
-    root_rule.appendChild(other_rule)
-
-    out_layer.setRenderer(QgsRuleBasedRenderer(root_rule))
-    out_layer.triggerRepaint()
-
-    feedback.pushInfo(f"  {len(new_features)} point(s) SIRENE chargés.")
+    feedback.pushInfo(f"  {len(new_features)} point(s) SIRENE placés.")
     return out_layer
