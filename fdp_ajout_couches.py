@@ -46,6 +46,16 @@ _sd_spec.loader.exec_module(_sd_mod)
 build_displaced_sirene_layer = _sd_mod.build_displaced_sirene_layer
 del _sd_spec, _sd_mod
 
+# ── build_activity_layers (Bâti par activité SIRENE) ─────────────────────────
+_sb_spec = importlib.util.spec_from_file_location(
+    "sirene_buildings",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_buildings.py"),
+)
+_sb_mod = importlib.util.module_from_spec(_sb_spec)
+_sb_spec.loader.exec_module(_sb_mod)
+build_activity_layers = _sb_mod.build_activity_layers
+del _sb_spec, _sb_mod
+
 # Codes INSEE des communes-mères PLM (établissements stockés sous arrondissements)
 _PLM_PARENT_CODES = {"75056", "69123", "13055"}
 
@@ -72,7 +82,7 @@ class FDPAjoutCouches(FDPParCommune):
 
     def processAlgorithm(self, parameters, context, feedback):
         root = QgsProject.instance().layerTreeRoot()
-        all_groups = self._collect_groups(root)
+        all_groups = self._collect_commune_candidates(root)
 
         if not all_groups:
             raise Exception(
@@ -123,7 +133,8 @@ class FDPAjoutCouches(FDPParCommune):
             if feedback.isCanceled():
                 break
 
-            nom = commune["nom"]
+            nom   = commune["nom"]
+            insee = commune["code"]
             feedback.pushInfo(f"\n[{i + 1}/{total}]  {nom}")
             feedback.setProgress(int(100 * i / total))
 
@@ -184,17 +195,15 @@ class FDPAjoutCouches(FDPParCommune):
                             insee, boundary_layer, crs_2154, feedback
                         )
                         if sirene_layer:
-                            # Chercher une couche polygone dans le groupe pour le déplacement
+                            # Chercher la couche bâtiments par nom — pas n'importe
+                            # quelle couche polygone (ZAI, emprise… causerait un
+                            # regroupement de tous les points au centroïde unique).
                             bati_layer = next(
                                 (
                                     QgsProject.instance().mapLayer(ll.layerId())
                                     for ll in group.findLayers()
                                     if QgsProject.instance().mapLayer(ll.layerId())
-                                    and isinstance(
-                                        QgsProject.instance().mapLayer(ll.layerId()),
-                                        QgsVectorLayer,
-                                    )
-                                    and QgsProject.instance().mapLayer(ll.layerId()).geometryType() == 2
+                                    and QgsProject.instance().mapLayer(ll.layerId()).name() == "Bâti"
                                 ),
                                 None,
                             )
@@ -203,10 +212,19 @@ class FDPAjoutCouches(FDPParCommune):
                                 sirene_layer = build_displaced_sirene_layer(
                                     sirene_layer, bati_layer, feedback
                                 )
+                                # Bâti par activité SIRENE
+                                activity_layers = build_activity_layers(
+                                    bati_layer, sirene_layer, feedback
+                                )
+                                if activity_layers:
+                                    act_grp = group.addGroup("Bâti par activité SIRENE")
+                                    for act_layer in activity_layers:
+                                        QgsProject.instance().addMapLayer(act_layer, False)
+                                        act_grp.addLayer(act_layer)
                             else:
                                 feedback.pushInfo(
-                                    "   ℹ  Pas de couche bâtiments trouvée — "
-                                    "points SIRENE sans déplacement."
+                                    "   ℹ  Couche « Bâti » introuvable — "
+                                    "points SIRENE placés sans déplacement bâtiment."
                                 )
                             self._apply_style(sirene_layer, "sirene")
                             QgsProject.instance().addMapLayer(sirene_layer, False)
@@ -229,70 +247,33 @@ class FDPAjoutCouches(FDPParCommune):
     # Helper — lookup silencieux (pas de dialogue)
     # =========================================================================
 
-    def _collect_groups(self, node):
-        """Collecte récursivement tous les QgsLayerTreeGroup sous node."""
-        groups = []
-        for child in node.children():
-            if isinstance(child, QgsLayerTreeGroup):
-                groups.append(child)
-                groups.extend(self._collect_groups(child))
-        return groups
-
-    def _lookup_commune_batch(self, nom, insee_hint, feedback, warn_on_miss=False):
+    def _collect_commune_candidates(self, root):
         """
-        Résout un nom de commune en dict {nom, code, geometry} sans ouvrir
-        de dialogue. Retourne None si introuvable ou ambigu.
-        Priorité : custom property fdp_insee → lookup par nom exact.
+        Retourne les groupes candidats communes sans descendre dans les
+        sous-groupes de couches (Bâti intrinsèque, Agriculture…).
+
+        Stratégie :
+          - Tout groupe ayant la propriété fdp_insee → commune certaine.
+          - Sinon : on cherche à profondeur 1 (enfants directs de root)
+            et profondeur 2 (petits-enfants) seulement — les sous-groupes
+            de couches sont à profondeur ≥ 3 et ne sont jamais des communes.
         """
-        _FIELDS = "fields=nom,code,contour&format=geojson&geometry=contour"
-        _TYPES  = "type=commune-actuelle,arrondissement-municipal"
-        _BASE   = "https://geo.api.gouv.fr/communes"
+        candidates = []
+        for child in root.children():
+            if not isinstance(child, QgsLayerTreeGroup):
+                continue
+            if child.customProperty("fdp_insee"):
+                candidates.append(child)
+            else:
+                # Profondeur 1 : peut être une commune directe ou un groupe
+                # organisationnel (Lot X…). On l'inclut pour vérification API.
+                candidates.append(child)
+                # Profondeur 2 : enfants directs du groupe de niveau 1.
+                # Si le niveau 1 est organisationnel, ses enfants sont les
+                # vraies communes.
+                for grandchild in child.children():
+                    if isinstance(grandchild, QgsLayerTreeGroup):
+                        candidates.append(grandchild)
+        return candidates
 
-        def _get(url):
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            return r.json().get("features", [])
-
-        def _to_dict(feat):
-            p = feat["properties"]
-            return {"nom": p["nom"], "code": p["code"], "geometry": feat["geometry"]}
-
-        try:
-            # 1. Lookup direct par code INSEE (fiable, commune déjà connue)
-            if insee_hint:
-                feats = _get(
-                    f"{_BASE}?code={requests.utils.quote(insee_hint)}&{_FIELDS}&{_TYPES}"
-                )
-                if feats:
-                    return _to_dict(feats[0])
-
-            # 2. Lookup par nom
-            feats = _get(
-                f"{_BASE}?nom={requests.utils.quote(nom)}&{_FIELDS}&{_TYPES}"
-            )
-            if not feats:
-                if warn_on_miss:
-                    feedback.reportError(f"   ⚠  « {nom} » introuvable dans l'API Géo.", fatalError=False)
-                return None
-
-            # Correspondance exacte (insensible à la casse)
-            for feat in feats:
-                if feat["properties"]["nom"].lower() == nom.lower():
-                    return _to_dict(feat)
-
-            # Résultat unique non exact → on le prend quand même
-            if len(feats) == 1:
-                return _to_dict(feats[0])
-
-            if warn_on_miss:
-                feedback.reportError(
-                    f"   ⚠  Plusieurs communes correspondent à « {nom} » — ignorée. "
-                    "Ré-importez avec « FDP par Commune » pour fixer le code INSEE.",
-                    fatalError=False,
-                )
-            return None
-
-        except Exception as e:
-            if warn_on_miss:
-                feedback.reportError(f"   ⚠  API Géo ({nom}) : {e}", fatalError=False)
-            return None
+    # _lookup_commune_batch is inherited from FDPParCommune

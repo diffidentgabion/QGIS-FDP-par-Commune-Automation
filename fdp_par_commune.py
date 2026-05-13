@@ -922,7 +922,28 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback.pushInfo(f"📍  {nom} ({dep}) — INSEE {insee}")
         feedback.setProgress(5)
 
-        # ── 2. Géométrie communale reprojetée en EPSG:2154 ───────────────────
+        # ── 2. Sélection des couches et édition des styles ────────────────────
+        dlg_sel = _LayerSelectorDialog()
+        if dlg_sel.exec_() != QDialog.Accepted:
+            raise Exception("Sélection des couches annulée.")
+        selected_entries = dlg_sel.result_layers
+        if not selected_entries and dlg_sel.topo_config is None:
+            raise Exception("Aucune couche sélectionnée.")
+
+        self._run_commune_import(commune, selected_entries, dlg_sel.topo_config, feedback)
+        return {}
+
+    # =========================================================================
+    # Logique d'import commune — réutilisée par FDPImportEnLot (import en lot)
+    # =========================================================================
+
+    def _run_commune_import(
+        self, commune, selected_entries, topo_config, feedback, show_save_dialog=True
+    ):
+        nom = commune["nom"]
+        insee = commune["code"]
+
+        # ── Géométrie communale reprojetée en EPSG:2154 ──────────────────────
         crs_4326 = QgsCoordinateReferenceSystem("EPSG:4326")
         crs_2154 = QgsCoordinateReferenceSystem("EPSG:2154")
         xform = QgsCoordinateTransform(crs_4326, crs_2154, QgsProject.instance())
@@ -936,15 +957,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         boundary_layer = self._geom_to_temp_layer(commune_geom, "Polygon", crs_2154)
         feedback.setProgress(10)
 
-        # ── 2.5. Sélection des couches et édition des styles ─────────────────
-        dlg_sel = _LayerSelectorDialog()
-        if dlg_sel.exec_() != QDialog.Accepted:
-            raise Exception("Sélection des couches annulée.")
-        selected_entries = dlg_sel.result_layers
-        if not selected_entries and dlg_sel.topo_config is None:
-            raise Exception("Aucune couche sélectionnée.")
-
-        # ── 3. Chargement des couches WFS ────────────────────────────────────
+        # ── Chargement des couches WFS ────────────────────────────────────────
         loaded_layers = {}  # style_key → QgsVectorLayer
         wfs_entries = [e for e in selected_entries if e["typename"] is not None]
         sirene_entry = next(
@@ -956,7 +969,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback.pushInfo(f"⬇  Téléchargement des couches ({total_layers})…")
         for i, entry in enumerate(wfs_entries):
             if feedback.isCanceled():
-                return {}
+                return
             feedback.pushInfo(f"   {entry['display_name']}…")
             layer = self._load_wfs_layer(
                 entry["typename"],
@@ -1074,7 +1087,6 @@ class FDPParCommune(QgsProcessingAlgorithm):
             feedback.pushInfo(f"   ✓  {len(bati_layers)} couche(s)")
 
         # ── 4g. Topographie ───────────────────────────────────────────────────
-        topo_config = dlg_sel.topo_config
         topo_layer = None
         hillshade_layer = None
         if topo_config and not feedback.isCanceled():
@@ -1278,25 +1290,26 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback.setProgress(90)
 
         # ── 6. Proposition d'enregistrement .qgz ─────────────────────────────
-        reply = QMessageBox.question(
-            None,
-            "Fond de plan prêt",
-            f"✅  Le fond de plan de {nom} est prêt !\n\n"
-            "Enregistrer le projet en fichier .qgz ?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply == QMessageBox.Yes:
-            default_filename = nom.replace(" ", "_") + "_basemap.qgz"
-            path, _ = QFileDialog.getSaveFileName(
+        if show_save_dialog:
+            reply = QMessageBox.question(
                 None,
-                "Enregistrer le projet QGIS",
-                os.path.join(os.path.expanduser("~"), default_filename),
-                "Projet QGIS (*.qgz)",
+                "Fond de plan prêt",
+                f"✅  Le fond de plan de {nom} est prêt !\n\n"
+                "Enregistrer le projet en fichier .qgz ?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
-            if path:
-                QgsProject.instance().write(path)
-                feedback.pushInfo(f"💾  Projet enregistré")
+            if reply == QMessageBox.Yes:
+                default_filename = nom.replace(" ", "_") + "_basemap.qgz"
+                path, _ = QFileDialog.getSaveFileName(
+                    None,
+                    "Enregistrer le projet QGIS",
+                    os.path.join(os.path.expanduser("~"), default_filename),
+                    "Projet QGIS (*.qgz)",
+                )
+                if path:
+                    QgsProject.instance().write(path)
+                    feedback.pushInfo(f"💾  Projet enregistré")
 
         # ── 7. Gestionnaire de thèmes ─────────────────────────────────────────
         # Ouvre (ou retrouve) le panneau de thèmes dans la session QGIS courante.
@@ -1310,7 +1323,6 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         feedback.setProgress(100)
         feedback.pushInfo("🎉  Fond de plan prêt !")
-        return {}
 
     # =========================================================================
     # Helper – recherche et sélection de commune
@@ -1396,6 +1408,97 @@ class FDPParCommune(QgsProcessingAlgorithm):
         if dlg.exec_() != QDialog.Accepted or dlg.selected_commune is None:
             return None
         return dlg.selected_commune
+
+    # =========================================================================
+    # Helper – résolution silencieuse (sans dialogue) d'un nom en commune
+    # =========================================================================
+
+    def _lookup_commune_batch(self, nom, insee_hint, feedback, warn_on_miss=False):
+        """
+        Résout un nom/code commune → dict {nom, code, geometry} sans dialogue.
+        Retourne None si introuvable ou ambigu.
+        Priorité : code INSEE direct → lookup par nom exact.
+        """
+        _FIELDS = "fields=nom,code,contour&format=geojson&geometry=contour"
+        _TYPES  = "type=commune-actuelle,arrondissement-municipal"
+        _BASE   = "https://geo.api.gouv.fr/communes"
+
+        def _get(url):
+            for attempt in range(4):
+                try:
+                    r = requests.get(url, timeout=15)
+                    r.raise_for_status()
+                    return r.json().get("features", [])
+                except Exception:
+                    if attempt == 3:
+                        raise
+                    time.sleep(2 ** attempt)
+
+        def _to_dict(feat):
+            p = feat["properties"]
+            return {"nom": p["nom"], "code": p["code"], "geometry": feat["geometry"]}
+
+        def _looks_like_insee(s):
+            # Code métropole : 5 chiffres
+            if s.isdigit() and len(s) == 5:
+                return True
+            # Corse : 2A/2B + 3 chiffres
+            if len(s) == 5 and s[:2].upper() in ("2A", "2B") and s[2:].isdigit():
+                return True
+            # DOM-TOM : commence par 97 + 3 chiffres (ex. 97209)
+            if len(s) == 5 and s[:2] == "97" and s[2:].isdigit():
+                return True
+            return False
+
+        try:
+            # 1. Lookup direct par code INSEE (fiable, commune déjà connue)
+            if insee_hint:
+                feats = _get(
+                    f"{_BASE}?code={requests.utils.quote(insee_hint)}&{_FIELDS}&{_TYPES}"
+                )
+                if feats:
+                    return _to_dict(feats[0])
+
+            # 2. L'entrée ressemble à un code INSEE → lookup direct avant le nom
+            if _looks_like_insee(nom):
+                feats = _get(
+                    f"{_BASE}?code={requests.utils.quote(nom.upper())}&{_FIELDS}&{_TYPES}"
+                )
+                if len(feats) == 1:
+                    return _to_dict(feats[0])
+
+            # 3. Lookup par nom
+            feats = _get(
+                f"{_BASE}?nom={requests.utils.quote(nom)}&{_FIELDS}&{_TYPES}"
+            )
+            if not feats:
+                if warn_on_miss:
+                    feedback.reportError(
+                        f"   ⚠  « {nom} » introuvable dans l'API Géo.", fatalError=False
+                    )
+                return None
+
+            # Correspondance exacte (insensible à la casse)
+            for feat in feats:
+                if feat["properties"]["nom"].lower() == nom.lower():
+                    return _to_dict(feat)
+
+            # Résultat unique non exact → on le prend
+            if len(feats) == 1:
+                return _to_dict(feats[0])
+
+            if warn_on_miss:
+                feedback.reportError(
+                    f"   ⚠  Plusieurs communes correspondent à « {nom} » — ignorée. "
+                    "Utilisez le code INSEE pour lever l'ambiguïté.",
+                    fatalError=False,
+                )
+            return None
+
+        except Exception as e:
+            if warn_on_miss:
+                feedback.reportError(f"   ⚠  API Géo ({nom}) : {e}", fatalError=False)
+            return None
 
     # =========================================================================
     # Helper – code département depuis INSEE
