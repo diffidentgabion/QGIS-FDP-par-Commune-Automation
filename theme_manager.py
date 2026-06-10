@@ -19,6 +19,13 @@ Rien à configurer : ajouter une commune charge automatiquement sa structure.
 
 import json
 
+from qgis.core import (
+    Qgis,
+    QgsLayerTreeGroup,
+    QgsLayerTreeLayer,
+    QgsMessageLog,
+    QgsProject,
+)
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
@@ -29,15 +36,27 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject
 
 _SCOPE = "fdp_theme_manager"
-_KEY   = "state"
+_KEY = "state"
+
+# Nombre de tentatives différées quand l'arbre du projet n'est pas (encore)
+# exploitable — couvre les chargements de projet en cours et les signaux ratés.
+_RETRY_BUDGET = 10
+
+
+def _log(message, level=None):
+    """Trace visible dans le panneau « Messages du journal » de QGIS."""
+    if level is None:
+        level = Qgis.Warning
+    QgsMessageLog.logMessage(message, "FDP Thèmes", level)
+    print(f"[theme_manager] {message}")
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
+
 
 def _collect_commune_groups(group, result):
     """
@@ -105,6 +124,7 @@ def _union_merge(qgs_node, d):
 # Dock
 # =============================================================================
 
+
 class ThemeManagerDock(QDockWidget):
     """
     Panneau latéral persistant — survit aux ré-exécutions du script Processing.
@@ -122,6 +142,11 @@ class ThemeManagerDock(QDockWidget):
 
         # tuple(chemin depuis la racine commune) → bool (True = visible)
         self._state: dict = {}
+
+        # Racine d'arbre actuellement écoutée (peut changer entre projets)
+        self._connected_root = None
+        # Tentatives restantes quand le projet n'est pas encore prêt
+        self._retry_budget = _RETRY_BUDGET
 
         # Debounce : un seul recalcul après chargement en bloc d'une commune
         self._debounce = QTimer(self)
@@ -143,7 +168,7 @@ class ThemeManagerDock(QDockWidget):
         vbox.setContentsMargins(8, 8, 8, 8)
         vbox.setSpacing(6)
 
-        btn_row  = QHBoxLayout()
+        btn_row = QHBoxLayout()
         btn_show = QPushButton("Tout afficher")
         btn_hide = QPushButton("Tout masquer")
         btn_show.clicked.connect(self._on_show_all)
@@ -168,9 +193,17 @@ class ThemeManagerDock(QDockWidget):
         """
         Reconstruit l'arbre depuis l'UNION de toutes les communes.
         Préserve les états connus. Ajoute les nouveaux nœuds à True par défaut.
+
+        Si le projet n'est pas encore exploitable (chargement en cours, signaux
+        ratés), planifie automatiquement une nouvelle tentative — le panneau ne
+        doit jamais rester vide alors que des communes sont chargées.
         """
+        # La racine du projet a pu être remplacée : on suit toujours l'actuelle.
+        self._ensure_root_signals()
+
         communes = _commune_groups()
         if not communes:
+            self._schedule_retry()
             return
 
         union = _build_union_tree(communes)
@@ -179,12 +212,22 @@ class ThemeManagerDock(QDockWidget):
         try:
             self._tree.clear()
             self._populate(self._tree.invisibleRootItem(), union, (), communes)
-        except Exception as exc:
+            self._retry_budget = _RETRY_BUDGET
+        except Exception:
             import traceback
-            print(f"[theme_manager] erreur lors de la construction de l'arbre :\n"
-                  f"{traceback.format_exc()}")
+
+            _log(
+                "erreur lors de la construction de l'arbre :\n" + traceback.format_exc()
+            )
+            # L'arbre vient d'être vidé : ne pas le laisser vide, on réessaie.
+            self._schedule_retry()
         finally:
             self._tree.blockSignals(False)
+
+    def _schedule_retry(self):
+        if self._retry_budget > 0:
+            self._retry_budget -= 1
+            self._debounce.start()
 
     def _populate(self, parent_item, union_dict, path, communes):
         for name, children in union_dict.items():
@@ -267,7 +310,7 @@ class ThemeManagerDock(QDockWidget):
         """Parcours récursif : applique chaque item de l'arbre au nœud QGIS correspondant."""
         for i in range(tree_parent.childCount()):
             item = tree_parent.child(i)
-            name    = item.text(0)
+            name = item.text(0)
             # PartiallyChecked → le groupe lui-même est visible (enfants gérés récursivement)
             visible = item.checkState(0) != Qt.Unchecked
 
@@ -314,8 +357,10 @@ class ThemeManagerDock(QDockWidget):
 
     def _collect_from(self, parent):
         for i in range(parent.childCount()):
-            item  = parent.child(i)
-            cpath = item.data(0, Qt.UserRole)
+            item = parent.child(i)
+            # Qt peut restituer le tuple stocké sous forme de liste → on force
+            # le tuple, seul type utilisable comme clé de dict.
+            cpath = tuple(item.data(0, Qt.UserRole) or ())
             self._state[cpath] = item.checkState(0) != Qt.Unchecked
             self._collect_from(item)
 
@@ -338,13 +383,38 @@ class ThemeManagerDock(QDockWidget):
     # ── Signaux projet ────────────────────────────────────────────────────────
 
     def _connect_signals(self):
+        project = QgsProject.instance()
+        # Signaux au niveau projet — insensibles aux remplacements de la racine
+        # de l'arbre, donc fiables quel que soit le cycle de vie du projet.
+        project.layersAdded.connect(self._on_tree_changed)
+        project.layersRemoved.connect(self._on_tree_changed)
+        project.cleared.connect(self._on_project_cleared)
+        project.readProject.connect(self._on_project_read)
+        self._ensure_root_signals()
+
+    def _ensure_root_signals(self):
+        """
+        (Re)branche addedChildren/removedChildren sur la racine COURANTE de
+        l'arbre, sans jamais doubler une connexion. La racine peut être
+        remplacée lors d'un clear/lecture de projet selon les versions de QGIS.
+        """
         root = QgsProject.instance().layerTreeRoot()
+        if root is self._connected_root:
+            return
+        old = self._connected_root
+        if old is not None:
+            try:
+                old.addedChildren.disconnect(self._on_tree_changed)
+                old.removedChildren.disconnect(self._on_tree_changed)
+            except (TypeError, RuntimeError):
+                pass  # déjà déconnecté ou objet C++ détruit
         root.addedChildren.connect(self._on_tree_changed)
         root.removedChildren.connect(self._on_tree_changed)
-        QgsProject.instance().cleared.connect(self._on_project_cleared)
-        QgsProject.instance().readProject.connect(self._on_project_read)
+        self._connected_root = root
 
     def _on_tree_changed(self, *_):
+        # Nouveau signal = nouvelles chances de trouver les communes.
+        self._retry_budget = _RETRY_BUDGET
         self._debounce.start()
 
     def _on_debounce(self):
@@ -356,13 +426,13 @@ class ThemeManagerDock(QDockWidget):
         self._tree.blockSignals(True)
         self._tree.clear()
         self._tree.blockSignals(False)
-        root = QgsProject.instance().layerTreeRoot()
-        root.addedChildren.connect(self._on_tree_changed)
-        root.removedChildren.connect(self._on_tree_changed)
+        self._retry_budget = _RETRY_BUDGET
+        self._ensure_root_signals()
 
     def _on_project_read(self, *_):
         """Charge l'état persisté après ouverture complète du projet."""
         self._debounce.stop()
+        self._retry_budget = _RETRY_BUDGET
         self._load_state()
         self._refresh_and_apply()
 
@@ -374,6 +444,7 @@ class ThemeManagerDock(QDockWidget):
 # =============================================================================
 # Auto-installation du hook de démarrage
 # =============================================================================
+
 
 def _install_startup_hook():
     """
@@ -396,13 +467,18 @@ def _install_startup_hook():
 
     try:
         from qgis.core import QgsApplication
+
         # qgisSettingsDirPath() retourne le dossier du profil actif, ex. :
         # C:\Users\…\AppData\Roaming\QGIS\QGIS3\profiles\default\
         profile_python = pathlib.Path(QgsApplication.qgisSettingsDirPath()) / "python"
     except Exception:
         profile_python = (
             pathlib.Path(os.environ.get("APPDATA", ""))
-            / "QGIS" / "QGIS3" / "profiles" / "default" / "python"
+            / "QGIS"
+            / "QGIS3"
+            / "profiles"
+            / "default"
+            / "python"
         )
 
     try:
@@ -410,7 +486,9 @@ def _install_startup_hook():
         startup_path = profile_python / "startup.py"
 
         MARKER = "# >>> fdp_theme_manager"
-        existing = startup_path.read_text(encoding="utf-8") if startup_path.exists() else ""
+        existing = (
+            startup_path.read_text(encoding="utf-8") if startup_path.exists() else ""
+        )
         if MARKER in existing:
             return  # Déjà installé
 
@@ -448,6 +526,26 @@ _QTimer.singleShot(1000, lambda: _fdp_open_hook() if _QgsProject.instance().file
 # Point d'entrée public
 # =============================================================================
 
+
+def _anchor(dock):
+    """
+    Garde une référence Python FORTE sur le dock dans qgis.utils (module
+    immortel pendant toute la session QGIS).
+
+    Sans cela, PyQt garbage-collecte la moitié Python du dock dès que le
+    script Processing se termine : le widget C++ survit (parenté à la fenêtre
+    principale, donc le panneau reste VISIBLE), mais toutes les connexions
+    signal→slot Python meurent — arbre jamais peuplé, boutons inertes.
+    C'était la cause du comportement intermittent.
+    """
+    try:
+        import qgis.utils
+
+        qgis.utils._fdp_theme_manager_dock = dock
+    except Exception:
+        pass
+
+
 def ensure_theme_manager(iface):
     """
     Crée le dock s'il n'existe pas encore, ou le retrouve s'il a déjà été
@@ -460,16 +558,30 @@ def ensure_theme_manager(iface):
     main_win = iface.mainWindow()
     existing = main_win.findChild(QDockWidget, ThemeManagerDock.OBJECT_NAME)
     if existing is not None:
-        if existing.widget() is None:
-            existing.close()
-            existing.deleteLater()
-        else:
+        try:
+            if existing.widget() is None:
+                raise RuntimeError("dock sans contenu")
             existing.show()
             existing.raise_()
+            # Reconstruction systématique : un dock déjà ouvert a pu rater des
+            # changements du projet (signaux perdus, projet rouvert, etc.).
+            # Lève AttributeError si la moitié Python du dock a été perdue
+            # (wrapper générique QDockWidget) → remplacement ci-dessous.
+            existing._refresh_and_apply()
+            _anchor(existing)
             _install_startup_hook()
             return existing
+        except Exception:
+            # Dock invalide (moitié Python garbage-collectée, widget détruit,
+            # instance d'une ancienne version…) → on le remplace par un neuf.
+            try:
+                existing.close()
+                existing.deleteLater()
+            except Exception:
+                pass
     dock = ThemeManagerDock(main_win)
     iface.addDockWidget(Qt.RightDockWidgetArea, dock)
     dock.show()
+    _anchor(dock)
     _install_startup_hook()
     return dock

@@ -53,7 +53,6 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
-    QSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -64,6 +63,7 @@ from qgis.PyQt.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -791,17 +791,64 @@ _RPG_PARCELLES_GROUPS = [
     # ── Céréales ──────────────────────────────────────────────────────
     (
         "Céréales",
-        ("AVH", "AVP", "BDH", "BDP", "BTH", "BTP", "CAG", "CAH", "EPE",
-         "MCS", "MCR", "MID", "MIS", "MLT", "MOH", "ORH", "ORP", "RIZ",
-         "SGH", "SGP", "SOG", "SRS", "TTH", "TTP"),
+        (
+            "AVH",
+            "AVP",
+            "BDH",
+            "BDP",
+            "BTH",
+            "BTP",
+            "CAG",
+            "CAH",
+            "EPE",
+            "MCS",
+            "MCR",
+            "MID",
+            "MIS",
+            "MLT",
+            "MOH",
+            "ORH",
+            "ORP",
+            "RIZ",
+            "SGH",
+            "SGP",
+            "SOG",
+            "SRS",
+            "TTH",
+            "TTP",
+        ),
         "#F0D060",
     ),
     # ── Oléagineux & protéagineux ──────────────────────────────────────
     (
         "Oléagineux & protéagineux",
-        ("ARA", "CML", "CZH", "CZP", "FEV", "FVL", "FVP", "GES", "LDH",
-         "LDP", "LEC", "LIH", "LIP", "MOT", "MPC", "OAG", "OEI", "OHR",
-         "PAG", "PCH", "PHI", "PHS", "PPR", "SOJ", "TRN"),
+        (
+            "ARA",
+            "CML",
+            "CZH",
+            "CZP",
+            "FEV",
+            "FVL",
+            "FVP",
+            "GES",
+            "LDH",
+            "LDP",
+            "LEC",
+            "LIH",
+            "LIP",
+            "MOT",
+            "MPC",
+            "OAG",
+            "OEI",
+            "OHR",
+            "PAG",
+            "PCH",
+            "PHI",
+            "PHS",
+            "PPR",
+            "SOJ",
+            "TRN",
+        ),
         "#E8A800",
     ),
     # ── Prairies permanentes ───────────────────────────────────────────
@@ -809,8 +856,20 @@ _RPG_PARCELLES_GROUPS = [
     # ── Prairies & fourrages temporaires ──────────────────────────────
     (
         "Prairies & fourrages temporaires",
-        ("AFG", "CPL", "GRA", "LOT", "LUZ", "MLC", "MLF", "MLG",
-         "PTR", "SAI", "TRE", "VES"),
+        (
+            "AFG",
+            "CPL",
+            "GRA",
+            "LOT",
+            "LUZ",
+            "MLC",
+            "MLF",
+            "MLG",
+            "PTR",
+            "SAI",
+            "TRE",
+            "VES",
+        ),
         "#70DC70",
     ),
     # ── Vignes ────────────────────────────────────────────────────────
@@ -818,36 +877,83 @@ _RPG_PARCELLES_GROUPS = [
     # ── Arboriculture & vergers ────────────────────────────────────────
     (
         "Arboriculture & vergers",
-        ("ACP", "AGR", "CBT", "CTG", "FLP", "NOS", "NOX", "OLI",
-         "PRU", "PVT", "PWT", "TRU", "VRG"),
+        (
+            "ACP",
+            "AGR",
+            "CBT",
+            "CTG",
+            "FLP",
+            "NOS",
+            "NOX",
+            "OLI",
+            "PRU",
+            "PVT",
+            "PWT",
+            "TRU",
+            "VRG",
+        ),
         "#FF8C00",
     ),
     # ── Maraîchage & légumes ───────────────────────────────────────────
     (
         "Maraîchage & légumes",
-        ("AIL", "ART", "CAR", "CCN", "CEL", "CHU", "EPI", "FLA", "FRA",
-         "LBF", "MDI", "MLO", "NVT", "OIG", "PFR", "PHF", "POR", "POT",
-         "PSL", "PTC", "PVP", "RDI", "TOM"),
+        (
+            "AIL",
+            "ART",
+            "CAR",
+            "CCN",
+            "CEL",
+            "CHU",
+            "EPI",
+            "FLA",
+            "FRA",
+            "LBF",
+            "MDI",
+            "MLO",
+            "NVT",
+            "OIG",
+            "PFR",
+            "PHF",
+            "POR",
+            "POT",
+            "PSL",
+            "PTC",
+            "PVP",
+            "RDI",
+            "TOM",
+        ),
         "#70EC70",
     ),
     # ── Jachères & surfaces temporairement non exploitées ─────────────
     ("Jachères & sol nu", ("JAC", "JNO", "SNE"), "#D4A060"),
     # ── Cultures industrielles & énergie ──────────────────────────────
-    ("Cultures industrielles & énergie",
-     ("BTN", "CHV", "CSE", "HBL", "LIF", "MSW", "TAB", "TCR"), "#E07820"),
+    (
+        "Cultures industrielles & énergie",
+        ("BTN", "CHV", "CSE", "HBL", "LIF", "MSW", "TAB", "TCR"),
+        "#E07820",
+    ),
     # ── PPAM — Plantes à Parfum, Aromatiques et Médicinales ───────────
-    ("PPAM — Aromatiques & médicinales",
-     ("AAR", "AME", "ARP", "FNU", "LAV", "PME", "PPP", "PRF"), "#CC60CC"),
+    (
+        "PPAM — Aromatiques & médicinales",
+        ("AAR", "AME", "ARP", "FNU", "LAV", "PME", "PPP", "PRF"),
+        "#CC60CC",
+    ),
     # ── Horticulture & pépinières ──────────────────────────────────────
     ("Horticulture & pépinières", ("CSS", "HPC", "PEP", "PEV"), "#90D890"),
     # ── Surfaces boisées & sylvopastorale ─────────────────────────────
     ("Surfaces boisées", ("CAE", "CEE", "CNA", "CNE", "SBO"), "#207030"),
     # ── Cultures tropicales (DOM) ──────────────────────────────────────
-    ("Cultures tropicales",
-     ("ANA", "BCA", "BEF", "CAC", "CSA", "SHD", "TBT", "VNL"), "#F4A04E"),
+    (
+        "Cultures tropicales",
+        ("ANA", "BCA", "BEF", "CAC", "CSA", "SHD", "TBT", "VNL"),
+        "#F4A04E",
+    ),
     # ── Surfaces environnementales ─────────────────────────────────────
-    ("Surfaces environnementales",
-     ("BFS", "BOR", "BTA", "MRS", "SAG", "SIN", "SNU"), "#88C099"),
+    (
+        "Surfaces environnementales",
+        ("BFS", "BOR", "BTA", "MRS", "SAG", "SIN", "SNU"),
+        "#88C099",
+    ),
     # ── Mélanges complexes (interrangs) ───────────────────────────────
     ("Mélanges complexes", ("CID", "CIT"), "#C8B830"),
 ]
@@ -930,7 +1036,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
         if not selected_entries and dlg_sel.topo_config is None:
             raise Exception("Aucune couche sélectionnée.")
 
-        self._run_commune_import(commune, selected_entries, dlg_sel.topo_config, feedback)
+        self._run_commune_import(
+            commune, selected_entries, dlg_sel.topo_config, feedback
+        )
         return {}
 
     # =========================================================================
@@ -1092,7 +1200,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
         if topo_config and not feedback.isCanceled():
             feedback.pushInfo("⛰  Topographie…")
             if topo_config["mode"] == "wfs":
-                topo_layer = self._load_topo_wfs(bbox, boundary_layer, crs_2154, feedback)
+                topo_layer = self._load_topo_wfs(
+                    bbox, boundary_layer, crs_2154, feedback
+                )
             else:
                 topo_layer, hillshade_layer = self._load_topo_lidar(
                     bbox,
@@ -1317,9 +1427,17 @@ class FDPParCommune(QgsProcessingAlgorithm):
         try:
             from qgis.utils import iface as _iface
 
-            ensure_theme_manager(_iface)
+            if _iface is not None:
+                ensure_theme_manager(_iface)
+                feedback.pushInfo("🎛  Panneau « Contrôle de visibilité » ouvert.")
         except Exception:
-            pass  # hors contexte GUI (tests headless) — on continue sans le dock
+            # Hors contexte GUI (tests headless) on continue sans le dock,
+            # mais on signale l'erreur au lieu de la masquer.
+            feedback.reportError(
+                "⚠  Impossible d'ouvrir le gestionnaire de thèmes :\n"
+                + traceback.format_exc(),
+                fatalError=False,
+            )
 
         feedback.setProgress(100)
         feedback.pushInfo("🎉  Fond de plan prêt !")
@@ -1348,6 +1466,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         def _fetch(url):
             import time
+
             for attempt in range(4):
                 try:
                     resp = requests.get(url, timeout=15)
@@ -1356,7 +1475,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 except Exception:
                     if attempt == 3:
                         raise
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
 
         features = []
         seen_codes = set()
@@ -1420,8 +1539,8 @@ class FDPParCommune(QgsProcessingAlgorithm):
         Priorité : code INSEE direct → lookup par nom exact.
         """
         _FIELDS = "fields=nom,code,contour&format=geojson&geometry=contour"
-        _TYPES  = "type=commune-actuelle,arrondissement-municipal"
-        _BASE   = "https://geo.api.gouv.fr/communes"
+        _TYPES = "type=commune-actuelle,arrondissement-municipal"
+        _BASE = "https://geo.api.gouv.fr/communes"
 
         def _get(url):
             for attempt in range(4):
@@ -1432,7 +1551,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 except Exception:
                     if attempt == 3:
                         raise
-                    time.sleep(2 ** attempt)
+                    time.sleep(2**attempt)
 
         def _to_dict(feat):
             p = feat["properties"]
@@ -1468,9 +1587,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                     return _to_dict(feats[0])
 
             # 3. Lookup par nom
-            feats = _get(
-                f"{_BASE}?nom={requests.utils.quote(nom)}&{_FIELDS}&{_TYPES}"
-            )
+            feats = _get(f"{_BASE}?nom={requests.utils.quote(nom)}&{_FIELDS}&{_TYPES}")
             if not feats:
                 if warn_on_miss:
                     feedback.reportError(
@@ -1657,7 +1774,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         if needs_dl:
             feedback.pushInfo("   ⬇  Téléchargement StockEtablissement INSEE (~2 Go)…")
-            feedback.pushInfo("      (opération unique — fichier mis en cache 35 jours)")
+            feedback.pushInfo(
+                "      (opération unique — fichier mis en cache 35 jours)"
+            )
             tmp = _CACHE_FILE + ".tmp"
             try:
                 with requests.get(_URL, stream=True, timeout=300) as r:
@@ -1673,8 +1792,8 @@ class FDPParCommune(QgsProcessingAlgorithm):
                             done += len(chunk)
                             if total and done % (200 * 1024 * 1024) < 4 * 1024 * 1024:
                                 feedback.pushInfo(
-                                    f"      {done // (1024*1024)} Mo"
-                                    f" / {total // (1024*1024)} Mo"
+                                    f"      {done // (1024 * 1024)} Mo"
+                                    f" / {total // (1024 * 1024)} Mo"
                                 )
                 os.replace(tmp, _CACHE_FILE)
                 feedback.pushInfo("   ✓  Cache SIRENE mis à jour")
@@ -1689,12 +1808,24 @@ class FDPParCommune(QgsProcessingAlgorithm):
         # ── Paris / Lyon / Marseille : les établissements sont stockés sous les
         #    codes arrondissement, pas sous le code commune parent.
         _PLM = {
-            "75056": ([f"751{str(i).zfill(2)}" for i in range(1, 21)],
-                      "Paris", "~1 000 000", "20–40 min"),
-            "69123": (["6938" + str(i) for i in range(1, 10)],
-                      "Lyon",  "~550 000",  "5–15 min"),
-            "13055": ([f"132{str(i).zfill(2)}" for i in range(1, 17)],
-                      "Marseille", "~300 000", "10–20 min"),
+            "75056": (
+                [f"751{str(i).zfill(2)}" for i in range(1, 21)],
+                "Paris",
+                "~1 000 000",
+                "20–40 min",
+            ),
+            "69123": (
+                ["6938" + str(i) for i in range(1, 10)],
+                "Lyon",
+                "~550 000",
+                "5–15 min",
+            ),
+            "13055": (
+                [f"132{str(i).zfill(2)}" for i in range(1, 17)],
+                "Marseille",
+                "~300 000",
+                "10–20 min",
+            ),
         }
         if insee in _PLM:
             arr_codes, city_name, est_count, est_time = _PLM[insee]
@@ -1720,7 +1851,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
             insee_codes = [insee]
 
         # ── Lecture parquet + filtre commune ─────────────────────────────────
-        label = insee if len(insee_codes) == 1 else f"{insee_codes[0]}–{insee_codes[-1]}"
+        label = (
+            insee if len(insee_codes) == 1 else f"{insee_codes[0]}–{insee_codes[-1]}"
+        )
         feedback.pushInfo(f"   🔍  Filtrage SIRENE commune {label}…")
         try:
             if len(insee_codes) == 1:
@@ -1746,18 +1879,18 @@ class FDPParCommune(QgsProcessingAlgorithm):
             return None
 
         # ── Colonnes en listes Python pour itération rapide ──────────────────
-        sirets     = table["siret"].to_pylist()
-        nafs       = table["activitePrincipaleEtablissement"].to_pylist()
-        enseignes  = table["enseigne1Etablissement"].to_pylist()
-        denoms     = table["denominationUsuelleEtablissement"].to_pylist()
-        xs         = table["coordonneeLambertAbscisseEtablissement"].to_pylist()
-        ys         = table["coordonneeLambertOrdonneeEtablissement"].to_pylist()
-        nums       = table["numeroVoieEtablissement"].to_pylist()
-        reps       = table["indiceRepetitionEtablissement"].to_pylist()
+        sirets = table["siret"].to_pylist()
+        nafs = table["activitePrincipaleEtablissement"].to_pylist()
+        enseignes = table["enseigne1Etablissement"].to_pylist()
+        denoms = table["denominationUsuelleEtablissement"].to_pylist()
+        xs = table["coordonneeLambertAbscisseEtablissement"].to_pylist()
+        ys = table["coordonneeLambertOrdonneeEtablissement"].to_pylist()
+        nums = table["numeroVoieEtablissement"].to_pylist()
+        reps = table["indiceRepetitionEtablissement"].to_pylist()
         types_voie = table["typeVoieEtablissement"].to_pylist()
-        libelles   = table["libelleVoieEtablissement"].to_pylist()
-        cps        = table["codePostalEtablissement"].to_pylist()
-        communes   = table["libelleCommuneEtablissement"].to_pylist()
+        libelles = table["libelleVoieEtablissement"].to_pylist()
+        cps = table["codePostalEtablissement"].to_pylist()
+        communes = table["libelleCommuneEtablissement"].to_pylist()
 
         # ── Couche mémoire EPSG:2154 (coordonnées Lambert déjà en L93) ───────
         mem_layer = QgsVectorLayer("Point?crs=EPSG:2154", "SIRENE_raw", "memory")
@@ -1796,7 +1929,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 continue
 
             adresse = " ".join(
-                filter(None, [nums[i], reps[i], types_voie[i], libelles[i], cps[i], communes[i]])
+                filter(
+                    None,
+                    [nums[i], reps[i], types_voie[i], libelles[i], cps[i], communes[i]],
+                )
             ).strip()
 
             feat = QgsFeature(mem_layer.fields())
@@ -2072,7 +2208,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
             feedback,
         )
 
-    def _load_topo_lidar(self, bbox, boundary_layer, crs_2154, interval, z_factor, azimuth, feedback):
+    def _load_topo_lidar(
+        self, bbox, boundary_layer, crs_2154, interval, z_factor, azimuth, feedback
+    ):
         """
         Télécharge le MNT LiDAR HD via une seule requête WMS sur le bbox communal,
         génère les courbes de niveau à l'intervalle demandé et un ombrage du relief
@@ -2208,8 +2346,16 @@ class FDPParCommune(QgsProcessingAlgorithm):
         """
 
         root = QgsRuleBasedRenderer.Rule(None)
-        root.appendChild(_make_line_rule("Courbe principale", "\"importance\" = '1'", "#000000", 0.22))
-        root.appendChild(_make_line_rule("Courbe secondaire", "\"importance\" = '0'", "#000000", 0.09))
+        root.appendChild(
+            _make_line_rule(
+                "Courbe principale", "\"importance\" = '1'", "#000000", 0.22
+            )
+        )
+        root.appendChild(
+            _make_line_rule(
+                "Courbe secondaire", "\"importance\" = '0'", "#000000", 0.09
+            )
+        )
         root.appendChild(_make_line_rule("Autre", "ELSE", "#000000", 0.09))
 
         layer.setRenderer(QgsRuleBasedRenderer(root))
@@ -2329,15 +2475,15 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         # Déplacement data-défini : présent quand la couche vient de
         # build_displaced_sirene_layer (champs offset_x_mm / offset_y_mm).
-        field_names   = [f.name() for f in layer.fields()]
+        field_names = [f.name() for f in layer.fields()]
         use_dd_offset = "offset_x_m" in field_names
 
         def _make_sym(color, size, shape):
             sym = QgsMarkerSymbol.createSimple(
                 {
-                    "color":         color,
-                    "name":          shape,
-                    "size":          str(size),
+                    "color": color,
+                    "name": shape,
+                    "size": str(size),
                     "outline_style": "no",
                 }
             )
@@ -2348,9 +2494,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 sl.setOffsetUnit(QgsUnitTypes.RenderMapUnits)
                 sl.setDataDefinedProperty(
                     QgsSymbolLayer.Property.PropertyOffset,
-                    QgsProperty.fromExpression(
-                        'array("offset_x_m", "offset_y_m")'
-                    ),
+                    QgsProperty.fromExpression('array("offset_x_m", "offset_y_m")'),
                 )
             return sym
 
@@ -2816,7 +2960,10 @@ class _LayerSelectorDialog(QDialog):
 
         self._build_section(scroll_layout, "Fond de plan", "default", collapsible=False)
         self._build_section(
-            scroll_layout, "Données thématiques", "extra", collapsible=True,
+            scroll_layout,
+            "Données thématiques",
+            "extra",
+            collapsible=True,
             checkbox_all=True,
         )
         self._build_section(
@@ -2943,7 +3090,9 @@ class _LayerSelectorDialog(QDialog):
         hbox.addStretch()
         return group
 
-    def _build_section(self, parent_layout, title, section, collapsible, note=None, checkbox_all=False):
+    def _build_section(
+        self, parent_layout, title, section, collapsible, note=None, checkbox_all=False
+    ):
         """Construit un QGroupBox avec les checkboxes de la section donnée."""
         entries = [e for e in _LAYER_CATALOGUE if e["section"] == section]
         group = QGroupBox(title)
