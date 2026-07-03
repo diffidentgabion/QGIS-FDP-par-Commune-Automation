@@ -139,10 +139,14 @@ helper, called by both. Removes ~30 duplicated lines and a future "fixed it in o
   (→ `Qgis.RenderUnit.Millimeters`); `QgsSymbolLayer.PropertyFillColor`
   (→ `QgsSymbolLayer.Property.FillColor`). None break today; all break on a PyQt6/Qt6 QGIS build.
   Finishing the migration consistently is worth a dedicated pass.
-- **L. SIRENE parquet URL is a single point of failure.** `_load_sirene:1744` hardcodes one
-  `object.files.data.gouv.fr/...parquet` path with no fallback; that bucket path has changed
-  before. Move it to config (§E) and give a clear, actionable error on 404 instead of a stack
-  trace.
+- **L. SIRENE parquet URL — RESOLVED (2026-07-03).** The old single
+  `object.files.data.gouv.fr/data-pipeline-open/...StockEtablissement_utf8.parquet` was the
+  *merged* "SIRENE géolocalisée BAN" product, **discontinued April 2026** → hard 404 → no
+  SIRENE. `_load_sirene` was rebuilt to (1) resolve the current parquet URLs at runtime via
+  the data.gouv API (URLs are monthly date-stamped) with hard-coded fallbacks; (2) join two
+  live INSEE sources on SIRET — StockEtablissement (NAF/name/commune) + Géolocalisation
+  (SIRET→X/Y); (3) keep a stale cache when a refresh fails instead of returning `None`; and
+  (4) reuse a pre-existing merged cache file as-is (zero download) for backward compatibility.
 - **M. WFS loading blocks the UI.** A full default import serially fires ~15 WFS GetFeature +
   `native:clip` round-trips on the main thread. Wrapping loads in `QgsTask` (or at least
   batching) would keep QGIS responsive on slow connections. Bigger change — only if import

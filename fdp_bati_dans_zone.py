@@ -50,10 +50,10 @@ class FDPBatiDansZone(QgsProcessingAlgorithm):
         return "FDP — Bâti dans zone"
 
     def group(self):
-        return "FDP par Commune"
+        return "Fond de Plan"
 
     def groupId(self):
-        return "fdp_par_commune"
+        return "fond_de_plan"
 
     def createInstance(self):
         return FDPBatiDansZone()
@@ -103,6 +103,36 @@ class FDPBatiDansZone(QgsProcessingAlgorithm):
         skip_count = 0
         total      = len(commune_entries)
 
+        # Géométries des zones lues UNE seule fois (au lieu d'une relecture + une
+        # reprojection à chaque commune). Le résultat reprojeté est mémorisé par
+        # CRS cible : comme toutes les communes FDP sont en Lambert-93, la
+        # reprojection n'a lieu qu'une fois pour l'ensemble du traitement.
+        zone_src_crs   = zone_layer.crs()
+        zone_geoms_src = []
+        for zone_feat in zone_layer.getFeatures():
+            zg = QgsGeometry(zone_feat.geometry())
+            if zg and not zg.isEmpty():
+                zone_geoms_src.append(zg)
+        _zone_cache = {}  # authid CRS cible -> list[QgsGeometry] reprojetées
+
+        def _zones_in_crs(target_crs):
+            key = target_crs.authid()
+            geoms = _zone_cache.get(key)
+            if geoms is None:
+                if zone_src_crs.authid() == key:
+                    geoms = zone_geoms_src
+                else:
+                    xf = QgsCoordinateTransform(
+                        zone_src_crs, target_crs, QgsProject.instance()
+                    )
+                    geoms = []
+                    for zg in zone_geoms_src:
+                        zt = QgsGeometry(zg)
+                        zt.transform(xf)
+                        geoms.append(zt)
+                _zone_cache[key] = geoms
+            return geoms
+
         for i, (group, bati_layer) in enumerate(commune_entries):
             if feedback.isCanceled():
                 break
@@ -119,14 +149,9 @@ class FDPBatiDansZone(QgsProcessingAlgorithm):
                     group.removeChildNode(child)
                     feedback.pushInfo(f"   ♻  Groupe « {group_name} » existant supprimé.")
 
-            # Transformation CRS si nécessaire
+            # CRS des bâtiments (les zones sont reprojetées vers ce CRS via le
+            # cache _zones_in_crs construit avant la boucle)
             bati_crs = bati_layer.crs()
-            zone_crs = zone_layer.crs()
-            xform    = (
-                QgsCoordinateTransform(zone_crs, bati_crs, QgsProject.instance())
-                if zone_crs.authid() != bati_crs.authid()
-                else None
-            )
 
             # Index spatial sur les bâtiments
             bld_index = QgsSpatialIndex()
@@ -143,16 +168,12 @@ class FDPBatiDansZone(QgsProcessingAlgorithm):
                 skip_count += 1
                 continue
 
-            # Appariement bâtiments × zones
+            # Appariement bâtiments × zones (géométries de zones déjà lues et
+            # reprojetées une seule fois par _zones_in_crs)
             matched_fids = set()
-            for zone_feat in zone_layer.getFeatures():
+            for zone_geom in _zones_in_crs(bati_crs):
                 if feedback.isCanceled():
                     break
-                zone_geom = QgsGeometry(zone_feat.geometry())
-                if not zone_geom or zone_geom.isEmpty():
-                    continue
-                if xform:
-                    zone_geom.transform(xform)
                 for bld_fid in bld_index.intersects(zone_geom.boundingBox()):
                     if zone_geom.intersects(bld_geom[bld_fid]):
                         matched_fids.add(bld_fid)

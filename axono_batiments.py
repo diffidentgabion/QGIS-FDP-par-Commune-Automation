@@ -173,10 +173,10 @@ class AxonoBatiments(QgsProcessingAlgorithm):
         return self.tr("Volumes axonométriques de bâtiments")
 
     def group(self):
-        return self.tr("FDP par Commune")
+        return self.tr("Fond de Plan")
 
     def groupId(self):
-        return "fdpparcommune"
+        return "fond_de_plan"
 
     def shortHelpString(self):
         return self.tr(

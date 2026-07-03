@@ -32,10 +32,10 @@ class FDPPavillonnaire(QgsProcessingAlgorithm):
         return "FDP — Créer groupe Pavillonnaire"
 
     def group(self):
-        return "FDP par Commune"
+        return "Fond de Plan"
 
     def groupId(self):
-        return "fdp_par_commune"
+        return "fond_de_plan"
 
     def createInstance(self):
         return FDPPavillonnaire()

@@ -127,6 +127,15 @@ del _tm_spec, _tm_mod
 # Catalogue des couches et styles par défaut
 # =============================================================================
 
+# Millésime des couches RPG épinglées à une édition annuelle. La Géoplateforme
+# publie chaque année de nouvelles couches RPG dont le typename contient l'année.
+# Pour passer à l'édition suivante, ne changer QUE ces deux constantes.
+_RPG_YEAR = "2024"
+# La couche « Zones densité homogène » ajoute une date de génération dans son nom
+# local (ex. surfaces_2024_zdh_20250621) qui change à chaque réédition et n'est
+# pas dérivable de l'année seule — à vérifier sur GetCapabilities.
+_RPG_ZDH_STAMP = "20250621"
+
 # Ordre du catalogue = ordre initial haut → bas dans la légende QGIS.
 # Chaque entry est un dict figé ; le dialogue en fait une copie mutable.
 _LAYER_CATALOGUE = [
@@ -253,10 +262,10 @@ _LAYER_CATALOGUE = [
         "checked": True,
     },
     # ── Couches rurales RPG (désactivées par défaut) ──────────────────────────
-    # Typenames vérifiés sur GetCapabilities data.geopf.fr — 2025-03-04.
     # RPG.LATEST:parcelles_graphiques et RPG.LATEST:ilots_anonymes ont un alias
-    # LATEST stable. Les quatre suivantes sont épinglées à 2024 — mettre à jour
-    # pour l'édition 2025 lorsque la Géoplateforme publie les nouvelles couches.
+    # LATEST stable. Les quatre suivantes sont épinglées à une année : leurs
+    # typenames dérivent de _RPG_YEAR (défini en haut du fichier) — changer cette
+    # seule constante pour passer à l'édition suivante.
     # Haie en premier : ajouté en tête du groupe Agriculture dans la légende.
     {
         "section": "rural",
@@ -283,32 +292,32 @@ _LAYER_CATALOGUE = [
         "checked": False,
     },
     {
-        "section": "rural",  # ⚠ 2024-pinned
-        "typename": "IGNF_RPG_PARCELLES-AGRICOLES-CATEGORISEES_2024:parcelles_agricole_categorisees_2024",
+        "section": "rural",  # millésime dérivé de _RPG_YEAR
+        "typename": f"IGNF_RPG_PARCELLES-AGRICOLES-CATEGORISEES_{_RPG_YEAR}:parcelles_agricole_categorisees_{_RPG_YEAR}",
         "display_name": "Catégories PAC",
         "style_key": "rpg_pac",
         "geom_type": "polygon",
         "checked": False,
     },
     {
-        "section": "rural",  # ⚠ 2024-pinned
-        "typename": "IGNF_RPG_PRAIRIES-PERMANENTES_2024:prairies_permanentes_2024",
+        "section": "rural",  # millésime dérivé de _RPG_YEAR
+        "typename": f"IGNF_RPG_PRAIRIES-PERMANENTES_{_RPG_YEAR}:prairies_permanentes_{_RPG_YEAR}",
         "display_name": "Prairies permanentes",
         "style_key": "rpg_pp",
         "geom_type": "polygon",
         "checked": False,
     },
     {
-        "section": "rural",  # ⚠ 2024-pinned (local name contient l'année)
-        "typename": "IGNF_RPG_PARCELLES-ELIGIBLES-IAE:parcelles_eligibles_iae_2024",
+        "section": "rural",  # millésime dérivé de _RPG_YEAR
+        "typename": f"IGNF_RPG_PARCELLES-ELIGIBLES-IAE:parcelles_eligibles_iae_{_RPG_YEAR}",
         "display_name": "Infra. agro-env.",
         "style_key": "rpg_iae",
         "geom_type": "polygon",
         "checked": False,
     },
     {
-        "section": "rural",  # ⚠ 2024-pinned (local name contient la date de génération)
-        "typename": "IGNF_RPG_ZONES-DENSITE-HOMOGENE_2024:surfaces_2024_zdh_20250621",
+        "section": "rural",  # millésime dérivé de _RPG_YEAR + _RPG_ZDH_STAMP
+        "typename": f"IGNF_RPG_ZONES-DENSITE-HOMOGENE_{_RPG_YEAR}:surfaces_{_RPG_YEAR}_zdh_{_RPG_ZDH_STAMP}",
         "display_name": "Zones densité homogène",
         "style_key": "rpg_zdh",
         "geom_type": "polygon",
@@ -1446,6 +1455,25 @@ class FDPParCommune(QgsProcessingAlgorithm):
     # Helper – recherche et sélection de commune
     # =========================================================================
 
+    # ── API Géo (geo.api.gouv.fr) — source unique + fetch partagé ─────────────
+    _GEO_API_BASE   = "https://geo.api.gouv.fr/communes"
+    _GEO_API_FIELDS = "fields=nom,code,contour&format=geojson&geometry=contour"
+    _GEO_API_TYPES  = "type=commune-actuelle,arrondissement-municipal"
+
+    @staticmethod
+    def _geo_api_fetch(url):
+        """GET une URL de l'API Géo, 4 tentatives avec backoff exponentiel.
+        Retourne la liste des 'features' GeoJSON (lève après le 4e échec)."""
+        for attempt in range(4):
+            try:
+                resp = requests.get(url, timeout=15)
+                resp.raise_for_status()
+                return resp.json().get("features", [])
+            except Exception:
+                if attempt == 3:
+                    raise
+                time.sleep(2 ** attempt)
+
     def _search_commune(self, nom_input):
         """
         Interroge l'API Géo gouv.fr et renvoie un dict commune, ou None si annulé.
@@ -1460,22 +1488,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
         Les résultats sont fusionnés et dédupliqués par code INSEE.
         """
         nom_input = nom_input.strip()
-        _FIELDS = "fields=nom,code,contour&format=geojson&geometry=contour"
-        _TYPES = "type=commune-actuelle,arrondissement-municipal"
-        _BASE = "https://geo.api.gouv.fr/communes"
-
-        def _fetch(url):
-            import time
-
-            for attempt in range(4):
-                try:
-                    resp = requests.get(url, timeout=15)
-                    resp.raise_for_status()
-                    return resp.json().get("features", [])
-                except Exception:
-                    if attempt == 3:
-                        raise
-                    time.sleep(2**attempt)
+        _BASE, _FIELDS, _TYPES = (
+            self._GEO_API_BASE, self._GEO_API_FIELDS, self._GEO_API_TYPES
+        )
+        _fetch = self._geo_api_fetch
 
         features = []
         seen_codes = set()
@@ -1538,20 +1554,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
         Retourne None si introuvable ou ambigu.
         Priorité : code INSEE direct → lookup par nom exact.
         """
-        _FIELDS = "fields=nom,code,contour&format=geojson&geometry=contour"
-        _TYPES = "type=commune-actuelle,arrondissement-municipal"
-        _BASE = "https://geo.api.gouv.fr/communes"
-
-        def _get(url):
-            for attempt in range(4):
-                try:
-                    r = requests.get(url, timeout=15)
-                    r.raise_for_status()
-                    return r.json().get("features", [])
-                except Exception:
-                    if attempt == 3:
-                        raise
-                    time.sleep(2**attempt)
+        _BASE, _FIELDS, _TYPES = (
+            self._GEO_API_BASE, self._GEO_API_FIELDS, self._GEO_API_TYPES
+        )
+        _get = self._geo_api_fetch
 
         def _to_dict(feat):
             p = feat["properties"]
@@ -1725,6 +1731,84 @@ class FDPParCommune(QgsProcessingAlgorithm):
     # Helper – SIRENE
     # =========================================================================
 
+    @staticmethod
+    def _resolve_datagouv_parquet_url(dataset_slug, title_needle, exclude_needle,
+                                      fallback_url, feedback):
+        """Résout l'URL de la ressource parquet courante d'un jeu de données
+        data.gouv (les URLs sont horodatées et changent chaque mois). Renvoie
+        fallback_url si l'API est injoignable ou si aucune ressource ne convient."""
+        api = f"https://www.data.gouv.fr/api/1/datasets/{dataset_slug}/"
+        try:
+            r = requests.get(api, timeout=30)
+            r.raise_for_status()
+            for res in r.json().get("resources", []):
+                if (res.get("format") or "").lower() != "parquet":
+                    continue
+                title = res.get("title") or ""
+                if title_needle and title_needle.lower() not in title.lower():
+                    continue
+                if exclude_needle and exclude_needle.lower() in title.lower():
+                    continue
+                if res.get("url"):
+                    return res["url"]
+        except Exception as e:
+            feedback.pushWarning(
+                f"⚠  Résolution URL data.gouv impossible ({e}) — URL de secours utilisée."
+            )
+        return fallback_url
+
+    @staticmethod
+    def _ensure_parquet_cache(cache_file, url, label, max_age, feedback):
+        """Assure la présence d'un parquet en cache local. Télécharge s'il est
+        absent ou périmé (> max_age). Si le téléchargement échoue mais qu'un
+        cache existe déjà, on le conserve (même périmé) plutôt que tout perdre.
+        Retourne True si un fichier utilisable est présent à la fin."""
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        exists = os.path.exists(cache_file)
+        stale = exists and (time.time() - os.path.getmtime(cache_file)) > max_age
+        if exists and not stale:
+            return True
+        if stale:
+            feedback.pushInfo(f"   ⬇  Rafraîchissement du cache {label} (> 35 j)…")
+        else:
+            feedback.pushInfo(
+                f"   ⬇  Téléchargement {label} (~1–2 Go, opération unique)…"
+            )
+        tmp = cache_file + ".tmp"
+        try:
+            with requests.get(url, stream=True, timeout=300) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                done = 0
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=4 * 1024 * 1024):
+                        if feedback.isCanceled():
+                            os.remove(tmp)
+                            return False
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total and done % (200 * 1024 * 1024) < 4 * 1024 * 1024:
+                            feedback.pushInfo(
+                                f"      {done // (1024 * 1024)} / {total // (1024 * 1024)} Mo"
+                            )
+            os.replace(tmp, cache_file)
+            feedback.pushInfo(f"   ✓  Cache {label} à jour")
+            return True
+        except Exception as e:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            if exists:
+                feedback.pushWarning(
+                    f"⚠  Rafraîchissement {label} impossible ({e}). "
+                    "Utilisation du cache local existant (peut être périmé)."
+                )
+                return True
+            feedback.reportError(
+                f"SIRENE — téléchargement {label} impossible et aucun cache local : {e}",
+                fatalError=False,
+            )
+            return False
+
     def _load_sirene(
         self,
         insee: str,
@@ -1733,30 +1817,50 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback,
     ):
         """
-        Charge les établissements SIRENE depuis un cache local du fichier national INSEE
-        (StockEtablissement, ~2 Go parquet). Le fichier est téléchargé une fois et mis
-        en cache 35 jours dans ~/.sirene/. Chaque import filtre localement par commune —
-        pas d'appels API, pas de limite, pas de risque de throttling.
+        Charge les établissements SIRENE en croisant deux fichiers nationaux INSEE
+        mis en cache dans ~/.sirene/ :
+          • StockEtablissement — NAF, enseigne/dénomination, commune, état ;
+          • Géolocalisation    — SIRET → coordonnées X/Y (Lambert 93 en métropole).
+        Les deux sont filtrés par commune puis joints sur le SIRET. Les URLs
+        (horodatées, mensuelles) sont résolues via l'API data.gouv avec une URL de
+        secours, et un cache périmé est conservé si le téléchargement échoue.
+
+        Rétro-compatibilité : si le cache StockEtablissement contient déjà les
+        colonnes de coordonnées (ancien fichier fusionné « géolocalisé BAN »,
+        produit arrêté en avril 2026), on lit les coordonnées directement sans
+        télécharger le fichier de géolocalisation.
         """
         import pyarrow.parquet as pq
 
-        _URL = (
-            "https://object.files.data.gouv.fr/data-pipeline-open/siren/stock/"
-            "StockEtablissement_utf8.parquet"
-        )
-        _CACHE_DIR = os.path.join(os.path.expanduser("~"), ".sirene")
-        _CACHE_FILE = os.path.join(_CACHE_DIR, "StockEtablissement.parquet")
-        _MAX_AGE = 35 * 24 * 3600  # 35 jours — INSEE met à jour mensuellement
+        _CACHE_DIR   = os.path.join(os.path.expanduser("~"), ".sirene")
+        _STOCK_CACHE = os.path.join(_CACHE_DIR, "StockEtablissement.parquet")
+        _GEO_CACHE   = os.path.join(_CACHE_DIR, "GeolocEtablissement.parquet")
+        _MAX_AGE     = 35 * 24 * 3600  # 35 j — INSEE publie mensuellement
 
-        _COLS = [
+        _STOCK_DATASET = (
+            "base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret"
+        )
+        _STOCK_FALLBACK = (
+            "https://static.data.gouv.fr/resources/"
+            "base-sirene-des-entreprises-et-de-leurs-etablissements-siren-siret/"
+            "20260701-093629/stock-stocketablissement-parquet.parquet"
+        )
+        _GEO_DATASET = (
+            "geolocalisation-des-etablissements-du-repertoire-sirene-pour-les-etudes-statistiques"
+        )
+        _GEO_FALLBACK = (
+            "https://static.data.gouv.fr/resources/"
+            "geolocalisation-des-etablissements-du-repertoire-sirene-pour-les-etudes-statistiques/"
+            "20260621-112946/geoloc-geolocalisationetablissement-sirene-pour-etudes-statistiques-parquet.parquet"
+        )
+
+        _STOCK_COLS = [
             "siret",
             "codeCommuneEtablissement",
             "etatAdministratifEtablissement",
             "activitePrincipaleEtablissement",
             "enseigne1Etablissement",
             "denominationUsuelleEtablissement",
-            "coordonneeLambertAbscisseEtablissement",
-            "coordonneeLambertOrdonneeEtablissement",
             "numeroVoieEtablissement",
             "indiceRepetitionEtablissement",
             "typeVoieEtablissement",
@@ -1765,44 +1869,34 @@ class FDPParCommune(QgsProcessingAlgorithm):
             "libelleCommuneEtablissement",
         ]
 
-        # ── Cache : téléchargement si absent ou périmé ────────────────────────
-        os.makedirs(_CACHE_DIR, exist_ok=True)
-        needs_dl = (
-            not os.path.exists(_CACHE_FILE)
-            or (time.time() - os.path.getmtime(_CACHE_FILE)) > _MAX_AGE
-        )
-
-        if needs_dl:
-            feedback.pushInfo("   ⬇  Téléchargement StockEtablissement INSEE (~2 Go)…")
-            feedback.pushInfo(
-                "      (opération unique — fichier mis en cache 35 jours)"
-            )
-            tmp = _CACHE_FILE + ".tmp"
+        # ── StockEtablissement : réutiliser un ancien fichier fusionné s'il ──
+        #    existe déjà (il contient les coordonnées), sinon (re)télécharger le
+        #    fichier stock simple. Le produit fusionné « géolocalisé BAN » étant
+        #    arrêté, on ne remplace JAMAIS un cache fusionné valide par le stock
+        #    simple (qui, lui, exige en plus le fichier de géolocalisation).
+        #    Pour forcer le passage aux fichiers à jour : supprimer ce cache.
+        legacy_geo = False
+        if os.path.exists(_STOCK_CACHE):
             try:
-                with requests.get(_URL, stream=True, timeout=300) as r:
-                    r.raise_for_status()
-                    total = int(r.headers.get("content-length", 0))
-                    done = 0
-                    with open(tmp, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=4 * 1024 * 1024):
-                            if feedback.isCanceled():
-                                os.remove(tmp)
-                                return None
-                            f.write(chunk)
-                            done += len(chunk)
-                            if total and done % (200 * 1024 * 1024) < 4 * 1024 * 1024:
-                                feedback.pushInfo(
-                                    f"      {done // (1024 * 1024)} Mo"
-                                    f" / {total // (1024 * 1024)} Mo"
-                                )
-                os.replace(tmp, _CACHE_FILE)
-                feedback.pushInfo("   ✓  Cache SIRENE mis à jour")
-            except Exception as e:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-                feedback.reportError(
-                    f"SIRENE — téléchargement impossible : {e}", fatalError=False
-                )
+                _schema = set(pq.ParquetFile(_STOCK_CACHE).schema_arrow.names)
+                legacy_geo = "coordonneeLambertAbscisseEtablissement" in _schema
+            except Exception:
+                legacy_geo = False
+
+        if legacy_geo:
+            feedback.pushInfo(
+                "   ℹ  Cache SIRENE fusionné détecté — réutilisé (aucun téléchargement)."
+            )
+        else:
+            stock_url = self._resolve_datagouv_parquet_url(
+                _STOCK_DATASET, "StockEtablissement", "Historique",
+                _STOCK_FALLBACK, feedback,
+            )
+            if not self._ensure_parquet_cache(
+                _STOCK_CACHE, stock_url, "StockEtablissement", _MAX_AGE, feedback
+            ):
+                return None
+            if feedback.isCanceled():
                 return None
 
         # ── Paris / Lyon / Marseille : les établissements sont stockés sous les
@@ -1850,41 +1944,42 @@ class FDPParCommune(QgsProcessingAlgorithm):
         else:
             insee_codes = [insee]
 
-        # ── Lecture parquet + filtre commune ─────────────────────────────────
+        # ── Lecture StockEtablissement filtré par commune ────────────────────
         label = (
             insee if len(insee_codes) == 1 else f"{insee_codes[0]}–{insee_codes[-1]}"
         )
         feedback.pushInfo(f"   🔍  Filtrage SIRENE commune {label}…")
-        try:
+
+        def _commune_filter(col):
             if len(insee_codes) == 1:
-                pq_filters = [
-                    ("codeCommuneEtablissement", "=", insee_codes[0]),
-                    ("etatAdministratifEtablissement", "=", "A"),
-                ]
-            else:
-                pq_filters = [
-                    ("codeCommuneEtablissement", "in", insee_codes),
-                    ("etatAdministratifEtablissement", "=", "A"),
-                ]
+                return [(col, "=", insee_codes[0])]
+            return [(col, "in", insee_codes)]
+
+        stock_cols = list(_STOCK_COLS)
+        if legacy_geo:
+            stock_cols += [
+                "coordonneeLambertAbscisseEtablissement",
+                "coordonneeLambertOrdonneeEtablissement",
+            ]
+        try:
             table = pq.read_table(
-                _CACHE_FILE,
-                columns=_COLS,
-                filters=pq_filters,
+                _STOCK_CACHE,
+                columns=stock_cols,
+                filters=_commune_filter("codeCommuneEtablissement")
+                + [("etatAdministratifEtablissement", "=", "A")],
             )
         except Exception as e:
             feedback.reportError(
-                f"SIRENE — lecture cache : {e}\n{traceback.format_exc()}",
+                f"SIRENE — lecture StockEtablissement : {e}\n{traceback.format_exc()}",
                 fatalError=False,
             )
             return None
 
-        # ── Colonnes en listes Python pour itération rapide ──────────────────
+        # ── Colonnes attributaires en listes Python ──────────────────────────
         sirets = table["siret"].to_pylist()
         nafs = table["activitePrincipaleEtablissement"].to_pylist()
         enseignes = table["enseigne1Etablissement"].to_pylist()
         denoms = table["denominationUsuelleEtablissement"].to_pylist()
-        xs = table["coordonneeLambertAbscisseEtablissement"].to_pylist()
-        ys = table["coordonneeLambertOrdonneeEtablissement"].to_pylist()
         nums = table["numeroVoieEtablissement"].to_pylist()
         reps = table["indiceRepetitionEtablissement"].to_pylist()
         types_voie = table["typeVoieEtablissement"].to_pylist()
@@ -1892,8 +1987,50 @@ class FDPParCommune(QgsProcessingAlgorithm):
         cps = table["codePostalEtablissement"].to_pylist()
         communes = table["libelleCommuneEtablissement"].to_pylist()
 
-        # ── Couche mémoire EPSG:2154 (coordonnées Lambert déjà en L93) ───────
-        mem_layer = QgsVectorLayer("Point?crs=EPSG:2154", "SIRENE_raw", "memory")
+        # ── Coordonnées : soit du fichier fusionné, soit du fichier géoloc ────
+        # coords : { siret -> (x, y) }.  epsg : CRS des coords (2154 en métropole).
+        epsg = "2154"
+        if legacy_geo:
+            _xs = table["coordonneeLambertAbscisseEtablissement"].to_pylist()
+            _ys = table["coordonneeLambertOrdonneeEtablissement"].to_pylist()
+            coords = {s: (x, y) for s, x, y in zip(sirets, _xs, _ys)}
+        else:
+            geo_url = self._resolve_datagouv_parquet_url(
+                _GEO_DATASET, None, None, _GEO_FALLBACK, feedback
+            )
+            if not self._ensure_parquet_cache(
+                _GEO_CACHE, geo_url, "Géolocalisation SIRENE", _MAX_AGE, feedback
+            ):
+                return None
+            if feedback.isCanceled():
+                return None
+            try:
+                geo = pq.read_table(
+                    _GEO_CACHE,
+                    columns=["SIRET", "X", "Y", "EPSG"],
+                    filters=_commune_filter("PLG_CODE_COMMUNE"),
+                )
+            except Exception as e:
+                feedback.reportError(
+                    f"SIRENE — lecture Géolocalisation : {e}\n{traceback.format_exc()}",
+                    fatalError=False,
+                )
+                return None
+            coords = {
+                s: (x, y)
+                for s, x, y in zip(
+                    geo["SIRET"].to_pylist(),
+                    geo["X"].to_pylist(),
+                    geo["Y"].to_pylist(),
+                )
+            }
+            for _e in geo["EPSG"].to_pylist():
+                if _e:
+                    epsg = str(_e).strip()
+                    break
+
+        # ── Couche mémoire dans le CRS des coordonnées (2154 en métropole) ───
+        mem_layer = QgsVectorLayer(f"Point?crs=EPSG:{epsg}", "SIRENE_raw", "memory")
         pr = mem_layer.dataProvider()
         pr.addAttributes(
             [
@@ -1912,8 +2049,11 @@ class FDPParCommune(QgsProcessingAlgorithm):
             if naf and naf[:2].isdigit() and int(naf[:2]) >= 97:
                 continue
 
-            # ── Coordonnées Lambert 93 ────────────────────────────────────────
-            x, y = xs[i], ys[i]
+            # ── Coordonnées (jointure sur le SIRET) ───────────────────────────
+            xy = coords.get(sirets[i])
+            if not xy:
+                continue
+            x, y = xy
             if not x or not y:
                 continue
             try:
@@ -1951,8 +2091,13 @@ class FDPParCommune(QgsProcessingAlgorithm):
             feedback.pushWarning("⚠  Aucun établissement localisé sur la commune")
             return None
 
-        # ── Découpage sur le contour communal (déjà en EPSG:2154) ────────────
+        # ── Reprojection vers 2154 si besoin (DOM), puis découpage commune ────
         mem_layer.dataProvider().createSpatialIndex()
+        if epsg != "2154":
+            mem_layer = processing.run(
+                "native:reprojectlayer",
+                {"INPUT": mem_layer, "TARGET_CRS": "EPSG:2154", "OUTPUT": "memory:"},
+            )["OUTPUT"]
         clipped = processing.run(
             "native:clip",
             {"INPUT": mem_layer, "OVERLAY": boundary_layer, "OUTPUT": "memory:"},
@@ -2471,6 +2616,17 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 "triangle",
                 None,
             ),
+        ]
+
+        # ── Source unique de vérité : la couleur vient de SIRENE_CATEGORIES ────
+        # (les couleurs des remplissages « Bâti par activité »). Les pastilles
+        # ne gardent en propre que forme + taille, et reprennent la couleur de
+        # leur catégorie. Empêche toute dérive entre remplissages et pastilles ;
+        # le fallback (couleur du tuple) protège si un libellé venait à différer.
+        _cat_color = {c["label"]: c["color"] for c in SIRENE_CATEGORIES}
+        groups = [
+            (label, ranges, _cat_color.get(label, color), size, shape, expr)
+            for (label, ranges, color, size, shape, expr) in groups
         ]
 
         # Déplacement data-défini : présent quand la couche vient de
