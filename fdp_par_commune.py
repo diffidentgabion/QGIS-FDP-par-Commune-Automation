@@ -41,6 +41,7 @@ from qgis.core import (
     QgsSymbolLayer,
     QgsUnitTypes,
     QgsVectorLayer,
+    QgsWkbTypes,
 )
 from qgis.gui import QgsColorButton
 from qgis.PyQt.QtCore import QMetaType, Qt
@@ -1116,14 +1117,22 @@ class FDPParCommune(QgsProcessingAlgorithm):
             if feedback.isCanceled():
                 return
             feedback.pushInfo(f"   {entry['display_name']}…")
-            layer = self._load_wfs_layer(
-                entry["typename"],
-                entry["display_name"],
-                bbox,
-                boundary_layer,
-                crs_2154,
-                feedback,
-            )
+            if entry["style_key"] == "parcels":
+                # Parcelles : filtre code_insee + matérialisation sans découpage
+                # (elles épousent déjà la limite communale) — bien plus rapide.
+                layer = self._load_parcelle_layer(
+                    entry["typename"], entry["display_name"], insee,
+                    bbox, boundary_layer, crs_2154, feedback,
+                )
+            else:
+                layer = self._load_wfs_layer(
+                    entry["typename"],
+                    entry["display_name"],
+                    bbox,
+                    boundary_layer,
+                    crs_2154,
+                    feedback,
+                )
             if layer:
                 loaded_layers[entry["style_key"]] = layer
             feedback.setProgress(10 + int((i + 1) * progress_per_layer))
@@ -1754,6 +1763,75 @@ class FDPParCommune(QgsProcessingAlgorithm):
         )["OUTPUT"]
         clipped.setName(display_name)
         return clipped
+
+    # Garde-fou : au-delà de ce nombre d'entités, le filtre code_insee n'a
+    # manifestement pas été appliqué (récupération nationale) → repli bbox+clip.
+    _PARCELLE_MAX = 500000
+
+    def _load_parcelle_layer(self, typename, display_name, insee, bbox,
+                             boundary_layer, crs_2154, feedback):
+        """
+        Charge les parcelles cadastrales via un FILTRE ATTRIBUTAIRE
+        (CQL_FILTER code_insee='INSEE') au lieu d'un filtre BBOX + découpage.
+
+        Les parcelles cadastrales sont rattachées administrativement à une seule
+        commune (elles ne franchissent jamais une limite communale), donc le
+        filtre code_insee renvoie exactement le même ensemble que bbox+clip, tout
+        en évitant (a) la sur-collecte des parcelles voisines et surtout (b) le
+        native:clip de dizaines de milliers de polygones — l'étape la plus lente.
+
+        Résultat matérialisé en couche mémoire (pas de couche WFS vive dans le
+        projet). Repli automatique sur bbox+clip si le filtre renvoie 0 (Paris/
+        Lyon/Marseille entières : parcelles taguées par arrondissement) ou un
+        nombre invraisemblable (filtre non honoré par le serveur).
+        """
+        from urllib.parse import quote
+
+        cql = quote(f"code_insee='{insee}'")
+        uri = (
+            "https://data.geopf.fr/wfs/ows"
+            "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+            f"&TYPENAME={typename}&SRSNAME=EPSG:2154&CQL_FILTER={cql}"
+        )
+
+        def _fallback(reason):
+            feedback.pushInfo(f"   ↩  Parcelles : {reason} — repli bbox + découpage.")
+            return self._load_wfs_layer(
+                typename, display_name, bbox, boundary_layer, crs_2154, feedback
+            )
+
+        try:
+            layer = QgsVectorLayer(uri, display_name, "WFS")
+            n = layer.featureCount() if layer.isValid() else 0
+            if n <= 0 or n > self._PARCELLE_MAX:
+                return _fallback(f"filtre code_insee inutilisable (n={n})")
+
+            # Sécurité : vérifier que le filtre s'applique bien aux ENTITÉS (pas
+            # seulement au comptage). On lit une entité témoin ; si son code_insee
+            # ne correspond pas, le provider ignore le CQL → repli (évite un
+            # téléchargement national qui ferait exploser la mémoire).
+            sample = next(layer.getFeatures(QgsFeatureRequest().setLimit(1)), None)
+            if sample is None or str(sample["code_insee"]) != str(insee):
+                got = None if sample is None else sample["code_insee"]
+                return _fallback(f"filtre non appliqué aux entités (témoin={got})")
+
+            # Matérialisation en mémoire (copie directe, sans découpage géométrique).
+            mem = QgsVectorLayer(
+                f"{QgsWkbTypes.displayString(layer.wkbType())}?crs=EPSG:2154",
+                display_name,
+                "memory",
+            )
+            pr = mem.dataProvider()
+            pr.addAttributes(layer.fields().toList())
+            mem.updateFields()
+            pr.addFeatures(list(layer.getFeatures()))
+            mem.updateExtents()
+            feedback.pushInfo(
+                f"   ✓  {mem.featureCount()} parcelles (filtre code_insee)"
+            )
+            return mem
+        except Exception as e:
+            return _fallback(f"voie rapide en erreur ({e})")
 
     # =========================================================================
     # Helper – SIRENE
