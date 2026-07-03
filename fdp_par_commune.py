@@ -803,6 +803,23 @@ def _apply_fill_rules(layer, rules, fallback_color, fallback_label, symbol_props
     layer.triggerRepaint()
 
 
+def _apply_line_rules(layer, rules):
+    """
+    Applique à `layer` un rendu règle-par-règle de lignes.
+
+    `rules` : itérable de (label, expr, color, width_mm[, pen_style]) — passé tel
+    quel à _make_line_rule (pen_style optionnel → trait plein par défaut).
+
+    Factorise le boilerplate partagé par _apply_roads_style, _apply_railways_style
+    et _apply_courbe_de_niveau_style. Rendu identique au code inline remplacé.
+    """
+    root = QgsRuleBasedRenderer.Rule(None)
+    for rule_args in rules:
+        root.appendChild(_make_line_rule(*rule_args))
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    layer.triggerRepaint()
+
+
 # =============================================================================
 # Données RPG — groupes de cultures (séparées du code de rendu)
 # =============================================================================
@@ -2298,12 +2315,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
             ),
         ]
 
-        root = QgsRuleBasedRenderer.Rule(None)
-        for label, expr, color, width, pen in rules:
-            root.appendChild(_make_line_rule(label, expr, color, width, pen))
-
-        layer.setRenderer(QgsRuleBasedRenderer(root))
-        layer.triggerRepaint()
+        _apply_line_rules(layer, rules)
 
     def _apply_railways_style(self, layer: QgsVectorLayer):
         """Voie ferrée — rendu règle par règle (QgsRuleBasedRenderer)."""
@@ -2342,12 +2354,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
             ),
         ]
 
-        root = QgsRuleBasedRenderer.Rule(None)
-        for label, expr, color, width, pen in rules:
-            root.appendChild(_make_line_rule(label, expr, color, width, pen))
-
-        layer.setRenderer(QgsRuleBasedRenderer(root))
-        layer.triggerRepaint()
+        _apply_line_rules(layer, rules)
 
     # =========================================================================
     # Helper — Topographie
@@ -2501,21 +2508,12 @@ class FDPParCommune(QgsProcessingAlgorithm):
           - altitude   : réel (mètres NGF)
         """
 
-        root = QgsRuleBasedRenderer.Rule(None)
-        root.appendChild(
-            _make_line_rule(
-                "Courbe principale", "\"importance\" = '1'", "#000000", 0.22
-            )
-        )
-        root.appendChild(
-            _make_line_rule(
-                "Courbe secondaire", "\"importance\" = '0'", "#000000", 0.09
-            )
-        )
-        root.appendChild(_make_line_rule("Autre", "ELSE", "#000000", 0.09))
-
-        layer.setRenderer(QgsRuleBasedRenderer(root))
-        layer.triggerRepaint()
+        rules = [
+            ("Courbe principale", "\"importance\" = '1'", "#000000", 0.22),
+            ("Courbe secondaire", "\"importance\" = '0'", "#000000", 0.09),
+            ("Autre", "ELSE", "#000000", 0.09),
+        ]
+        _apply_line_rules(layer, rules)
 
     def _apply_sirene_style(self, layer: QgsVectorLayer):
         """
