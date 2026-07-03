@@ -52,7 +52,7 @@ from qgis.core import (
     QgsSingleSymbolRenderer,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QMetaType
 from qgis.PyQt.QtGui import QColor
 
 
@@ -235,7 +235,7 @@ def _make_density_layer(crs_id, fields, density_data):
     pr  = lyr.dataProvider()
 
     # ①
-    pr.addAttributes(fields.toList() + [QgsField(field_name, QVariant.Double)])
+    pr.addAttributes(fields.toList() + [QgsField(field_name, QMetaType.Type.Double)])
     lyr.updateFields()
 
     lyr_fields = lyr.fields()
@@ -295,7 +295,7 @@ def _make_height_layer(crs_id, fields, height_data):
     pr  = lyr.dataProvider()
 
     # ①
-    pr.addAttributes(fields.toList() + [QgsField(field_name, QVariant.Int)])
+    pr.addAttributes(fields.toList() + [QgsField(field_name, QMetaType.Type.Int)])
     lyr.updateFields()
 
     lyr_fields     = lyr.fields()

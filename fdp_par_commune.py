@@ -43,7 +43,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.gui import QgsColorButton
-from qgis.PyQt.QtCore import QMetaType, Qt, QVariant
+from qgis.PyQt.QtCore import QMetaType, Qt
 from qgis.PyQt.QtGui import QColor, QPainter
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -2464,7 +2464,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         # Toutes les valeurs sont envoyées en un seul appel dataProvider pour éviter
         # N transactions séparées (critique sur les communes denses à petit intervalle).
         major = interval * 5
-        clipped.dataProvider().addAttributes([QgsField("importance", QVariant.String)])
+        clipped.dataProvider().addAttributes([QgsField("importance", QMetaType.Type.QString)])
         clipped.updateFields()
         imp_idx = clipped.fields().indexOf("importance")
         changes = {}

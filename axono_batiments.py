@@ -39,7 +39,7 @@ from qgis.core import (
     QgsVectorLayer,
     QgsWkbTypes,
 )
-from qgis.PyQt.QtCore import QCoreApplication, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.PyQt.QtGui import QColor
 
 _GROUP_NAME    = "Axo"
@@ -256,15 +256,15 @@ class AxonoBatiments(QgsProcessingAlgorithm):
     @staticmethod
     def _line_fields():
         fields = QgsFields()
-        fields.append(QgsField("sort_y", QVariant.Double))
+        fields.append(QgsField("sort_y", QMetaType.Type.Double))
         return fields
 
     @staticmethod
     def _fill_fields():
         fields = QgsFields()
-        fields.append(QgsField("face_type", QVariant.String))
-        fields.append(QgsField("sort_y",    QVariant.Double))
-        fields.append(QgsField("color",     QVariant.String))
+        fields.append(QgsField("face_type", QMetaType.Type.QString))
+        fields.append(QgsField("sort_y",    QMetaType.Type.Double))
+        fields.append(QgsField("color",     QMetaType.Type.QString))
         return fields
 
     # ------------------------------------------------------------------
