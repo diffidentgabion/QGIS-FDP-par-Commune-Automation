@@ -773,6 +773,36 @@ def _make_line_rule(label, expr, color, width_mm, pen_style=Qt.SolidLine):
     return rule
 
 
+def _apply_fill_rules(layer, rules, fallback_color, fallback_label, symbol_props=None):
+    """
+    Applique à `layer` un rendu règle-par-règle de remplissages + un repli ELSE.
+
+    `rules`        : itérable de (label, color, expr).
+    `symbol_props` : propriétés QgsFillSymbol communes à toutes les règles
+                     (contour…), fusionnées avec la couleur de chaque règle.
+
+    Factorise le boilerplate partagé par _apply_zai_style et les styles RPG
+    polygonaux. Le rendu produit est identique au code inline qu'il remplace.
+    """
+    base = dict(symbol_props or {})
+    root = QgsRuleBasedRenderer.Rule(None)
+    for label, color, expr in rules:
+        rule = QgsRuleBasedRenderer.Rule(
+            QgsFillSymbol.createSimple({**base, "color": color})
+        )
+        rule.setFilterExpression(expr)
+        rule.setLabel(label)
+        root.appendChild(rule)
+    fallback = QgsRuleBasedRenderer.Rule(
+        QgsFillSymbol.createSimple({**base, "color": fallback_color})
+    )
+    fallback.setFilterExpression("ELSE")
+    fallback.setLabel(fallback_label)
+    root.appendChild(fallback)
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    layer.triggerRepaint()
+
+
 # =============================================================================
 # Données RPG — groupes de cultures (séparées du code de rendu)
 # =============================================================================
@@ -2664,7 +2694,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         correspond à aucune des 8 catégories connues (ou est NULL), la règle
         ELSE s'applique avec le remplissage de repli #E8E8E8.
         """
-        rules_data = [
+        categories = [
             ("Science et enseignement", "#FFF0B3"),
             ("Santé", "#B3F5E6"),
             ("Administratif ou militaire", "#F5B3B6"),
@@ -2674,37 +2704,16 @@ class FDPParCommune(QgsProcessingAlgorithm):
             ("Religieux", "#E0D0E8"),
             ("Gestion des eaux", "#C4E3F5"),
         ]
-
-        root_rule = QgsRuleBasedRenderer.Rule(None)
-
-        for label, fill_color in rules_data:
-            sym = QgsFillSymbol.createSimple(
-                {
-                    "color": fill_color,
-                    "outline_color": "#888888",
-                    "outline_width": "0.2",
-                }
-            )
-            rule = QgsRuleBasedRenderer.Rule(sym)
-            rule.setFilterExpression(f"\"categorie\" = '{label}'")
-            rule.setLabel(label)
-            root_rule.appendChild(rule)
-
-        # Règle ELSE pour catégories inconnues / NULL
-        fallback_sym = QgsFillSymbol.createSimple(
-            {
-                "color": "#E8E8E8",
-                "outline_color": "#888888",
-                "outline_width": "0.2",
-            }
+        rules = [
+            (label, color, f"\"categorie\" = '{label}'")
+            for label, color in categories
+        ]
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color="#E8E8E8",
+            fallback_label="Autre / non classé",
+            symbol_props={"outline_color": "#888888", "outline_width": "0.2"},
         )
-        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
-        fallback_rule.setFilterExpression("ELSE")
-        fallback_rule.setLabel("Autre / non classé")
-        root_rule.appendChild(fallback_rule)
-
-        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
-        layer.triggerRepaint()
 
     # =========================================================================
     # Helpers – symbologie RPG
@@ -2719,25 +2728,17 @@ class FDPParCommune(QgsProcessingAlgorithm):
         tombe dans le repli.
         Données dans _RPG_PARCELLES_GROUPS (module-level).
         """
-        groups = _RPG_PARCELLES_GROUPS
-        root_rule = QgsRuleBasedRenderer.Rule(None)
-        for label, codes, color in groups:
+        rules = []
+        for label, codes, color in _RPG_PARCELLES_GROUPS:
             quoted = ", ".join(f"'{c}'" for c in codes)
-            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
-            rule = QgsRuleBasedRenderer.Rule(sym)
-            rule.setFilterExpression(f'"code_cultu" IN ({quoted})')
-            rule.setLabel(label)
-            root_rule.appendChild(rule)
-        # ZZZ (culture inconnue) et tout code non encore répertorié
-        fallback_sym = QgsFillSymbol.createSimple(
-            {"color": "#E8D880", "outline_style": "no"}
+            rules.append((label, color, f'"code_cultu" IN ({quoted})'))
+        # ZZZ (culture inconnue) et tout code non répertorié → repli
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color="#E8D880",
+            fallback_label="Culture non identifiée",
+            symbol_props={"outline_style": "no"},
         )
-        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
-        fallback_rule.setFilterExpression("ELSE")
-        fallback_rule.setLabel("Culture non identifiée")
-        root_rule.appendChild(fallback_rule)
-        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
-        layer.triggerRepaint()
 
     def _apply_rpg_ilots_style(self, layer: QgsVectorLayer):
         """Îlots anonymisés RPG — grille neutre, sans catégorisation."""
@@ -2756,28 +2757,22 @@ class FDPParCommune(QgsProcessingAlgorithm):
         Rendu par catégorie PAC — champ cat_cult_p (xsd:string).
         Valeurs attendues : 'TA', 'PP', 'CP', 'SB' (codes officiels PAC).
         """
-        rules_data = [
+        pac = [
             ("TA", "Terres arables", "#F0D060"),
             ("CP", "Cultures permanentes", "#FF8C00"),
             ("PP", "Prairies permanentes", "#18A018"),
             ("SB", "Surfaces boisées", "#207030"),
         ]
-        root_rule = QgsRuleBasedRenderer.Rule(None)
-        for code, label, color in rules_data:
-            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
-            rule = QgsRuleBasedRenderer.Rule(sym)
-            rule.setFilterExpression(f"\"cat_cult_p\" = '{code}'")
-            rule.setLabel(label)
-            root_rule.appendChild(rule)
-        fallback_sym = QgsFillSymbol.createSimple(
-            {"color": "#E8E8E8", "outline_style": "no"}
+        rules = [
+            (label, color, f"\"cat_cult_p\" = '{code}'")
+            for code, label, color in pac
+        ]
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color="#E8E8E8",
+            fallback_label="Autre / non classé",
+            symbol_props={"outline_style": "no"},
         )
-        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
-        fallback_rule.setFilterExpression("ELSE")
-        fallback_rule.setLabel("Autre / non classé")
-        root_rule.appendChild(fallback_rule)
-        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
-        layer.triggerRepaint()
 
     def _apply_rpg_pp_style(self, layer: QgsVectorLayer):
         """Prairies permanentes RPG — remplissage vert uniforme."""
@@ -2863,23 +2858,16 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 "#90DCA8",
             ),
         ]
-        root_rule = QgsRuleBasedRenderer.Rule(None)
+        rules = []
         for label, codes, color in groups:
             quoted = ", ".join(f"'{c}'" for c in codes)
-            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
-            rule = QgsRuleBasedRenderer.Rule(sym)
-            rule.setFilterExpression(f'"code_cultu" IN ({quoted})')
-            rule.setLabel(label)
-            root_rule.appendChild(rule)
-        fallback_sym = QgsFillSymbol.createSimple(
-            {"color": "#45C484", "outline_style": "no"}
+            rules.append((label, color, f'"code_cultu" IN ({quoted})'))
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color="#45C484",
+            fallback_label="Autres éléments IAE",
+            symbol_props={"outline_style": "no"},
         )
-        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
-        fallback_rule.setFilterExpression("ELSE")
-        fallback_rule.setLabel("Autres éléments IAE")
-        root_rule.appendChild(fallback_rule)
-        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
-        layer.triggerRepaint()
 
     def _apply_rpg_zdh_style(self, layer: QgsVectorLayer):
         """
@@ -2887,26 +2875,17 @@ class FDPParCommune(QgsProcessingAlgorithm):
         prorata (xsd:string) représente la proportion de surface agricole
         dans la zone ; converti en réel avec to_real() dans l'expression.
         """
-        rules_data = [
+        zdh = [
             ('to_real("prorata") >= 0.8', "ZDH — forte densité", "#D87020"),
             ('to_real("prorata") >= 0.5', "ZDH — densité moyenne", "#D4B060"),
         ]
-        root_rule = QgsRuleBasedRenderer.Rule(None)
-        for expr, label, color in rules_data:
-            sym = QgsFillSymbol.createSimple({"color": color, "outline_style": "no"})
-            rule = QgsRuleBasedRenderer.Rule(sym)
-            rule.setFilterExpression(expr)
-            rule.setLabel(label)
-            root_rule.appendChild(rule)
-        fallback_sym = QgsFillSymbol.createSimple(
-            {"color": "#F0EAD6", "outline_style": "no"}
+        rules = [(label, color, expr) for expr, label, color in zdh]
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color="#F0EAD6",
+            fallback_label="ZDH — faible densité / indéterminé",
+            symbol_props={"outline_style": "no"},
         )
-        fallback_rule = QgsRuleBasedRenderer.Rule(fallback_sym)
-        fallback_rule.setFilterExpression("ELSE")
-        fallback_rule.setLabel("ZDH — faible densité / indéterminé")
-        root_rule.appendChild(fallback_rule)
-        layer.setRenderer(QgsRuleBasedRenderer(root_rule))
-        layer.triggerRepaint()
 
     # =========================================================================
     # Helper – symbologie personnalisée (depuis _LayerSelectorDialog)
