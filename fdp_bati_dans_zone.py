@@ -153,17 +153,15 @@ class FDPBatiDansZone(QgsProcessingAlgorithm):
             # cache _zones_in_crs construit avant la boucle)
             bati_crs = bati_layer.crs()
 
-            # Index spatial sur les bâtiments
+            # Index spatial sur les bâtiments (on garde la feature entière — sa
+            # géométrie sert au test d'intersection ET à la couche de sortie)
             bld_index = QgsSpatialIndex()
-            bld_geom  = {}
             bld_feat  = {}
             for feat in bati_layer.getFeatures():
-                fid = feat.id()
                 bld_index.addFeature(feat)
-                bld_geom[fid] = QgsGeometry(feat.geometry())
-                bld_feat[fid] = feat
+                bld_feat[feat.id()] = feat
 
-            if not bld_geom:
+            if not bld_feat:
                 feedback.pushInfo("   ℹ  Couche Bâti vide — commune ignorée.")
                 skip_count += 1
                 continue
@@ -175,7 +173,7 @@ class FDPBatiDansZone(QgsProcessingAlgorithm):
                 if feedback.isCanceled():
                     break
                 for bld_fid in bld_index.intersects(zone_geom.boundingBox()):
-                    if zone_geom.intersects(bld_geom[bld_fid]):
+                    if zone_geom.intersects(bld_feat[bld_fid].geometry()):
                         matched_fids.add(bld_fid)
 
             if not matched_fids:

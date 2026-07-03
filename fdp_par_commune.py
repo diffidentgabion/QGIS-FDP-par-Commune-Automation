@@ -70,58 +70,39 @@ from qgis.PyQt.QtWidgets import (
 )
 
 # =============================================================================
-# Chargement du module helper sirene_buildings
+# Chargement des modules helper voisins
 # =============================================================================
 # Les scripts Processing QGIS n'ont pas de __package__ défini, donc les imports
-# relatifs échouent. On charge le fichier voisin via importlib avec son chemin
-# absolu, ce qui fonctionne quel que soit l'emplacement du script.
-_sb_spec = importlib.util.spec_from_file_location(
-    "sirene_buildings",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_buildings.py"),
-)
-_sb_mod = importlib.util.module_from_spec(_sb_spec)
-_sb_spec.loader.exec_module(_sb_mod)
-build_activity_layers = _sb_mod.build_activity_layers
-SIRENE_CATEGORIES = _sb_mod.SIRENE_CATEGORIES
-del _sb_spec, _sb_mod
+# relatifs échouent. On charge chaque fichier voisin via importlib avec son
+# chemin absolu, ce qui fonctionne quel que soit l'emplacement du script.
+def _load_sibling(module_name):
+    """Charge et renvoie le module .py voisin `module_name` (sans extension)."""
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), module_name + ".py"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-_zb_spec = importlib.util.spec_from_file_location(
-    "zone_buildings",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "zone_buildings.py"),
-)
-_zb_mod = importlib.util.module_from_spec(_zb_spec)
-_zb_spec.loader.exec_module(_zb_mod)
-build_zone_activity_layers = _zb_mod.build_zone_activity_layers
-build_outdoor_space_layers = _zb_mod.build_outdoor_space_layers
-_ZB_OUTDOOR_PUBLIC = _zb_mod._OUTDOOR_PUBLIC
-del _zb_spec, _zb_mod
 
-_bb_spec = importlib.util.spec_from_file_location(
-    "bati_buildings",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "bati_buildings.py"),
-)
-_bb_mod = importlib.util.module_from_spec(_bb_spec)
-_bb_spec.loader.exec_module(_bb_mod)
-build_bati_layers = _bb_mod.build_bati_layers
-del _bb_spec, _bb_mod
+_mod = _load_sibling("sirene_buildings")
+build_activity_layers = _mod.build_activity_layers
+SIRENE_CATEGORIES = _mod.SIRENE_CATEGORIES
 
-_sd_spec = importlib.util.spec_from_file_location(
-    "sirene_display",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_display.py"),
-)
-_sd_mod = importlib.util.module_from_spec(_sd_spec)
-_sd_spec.loader.exec_module(_sd_mod)
-build_displaced_sirene_layer = _sd_mod.build_displaced_sirene_layer
-del _sd_spec, _sd_mod
+_mod = _load_sibling("zone_buildings")
+build_zone_activity_layers = _mod.build_zone_activity_layers
+build_outdoor_space_layers = _mod.build_outdoor_space_layers
+_ZB_OUTDOOR_PUBLIC = _mod._OUTDOOR_PUBLIC
 
-_tm_spec = importlib.util.spec_from_file_location(
-    "theme_manager",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "theme_manager.py"),
-)
-_tm_mod = importlib.util.module_from_spec(_tm_spec)
-_tm_spec.loader.exec_module(_tm_mod)
-ensure_theme_manager = _tm_mod.ensure_theme_manager
-del _tm_spec, _tm_mod
+_mod = _load_sibling("bati_buildings")
+build_bati_layers = _mod.build_bati_layers
+
+_mod = _load_sibling("sirene_display")
+build_displaced_sirene_layer = _mod.build_displaced_sirene_layer
+
+ensure_theme_manager = _load_sibling("theme_manager").ensure_theme_manager
+del _mod
 
 # =============================================================================
 # Catalogue des couches et styles par défaut

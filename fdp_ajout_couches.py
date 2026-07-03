@@ -25,36 +25,25 @@ from qgis.core import (
 )
 from qgis.PyQt.QtWidgets import QDialog
 
-# ── Charger FDPParCommune et ses helpers depuis fdp_par_commune.py ────────────
-_fdp_spec = importlib.util.spec_from_file_location(
-    "fdp_par_commune",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "fdp_par_commune.py"),
-)
-_fdp_mod = importlib.util.module_from_spec(_fdp_spec)
-_fdp_spec.loader.exec_module(_fdp_mod)
-FDPParCommune      = _fdp_mod.FDPParCommune
-_LayerSelectorDialog = _fdp_mod._LayerSelectorDialog
-del _fdp_spec, _fdp_mod
+# ── Chargement des modules voisins (pas de __package__ en script Processing) ──
+def _load_sibling(module_name):
+    """Charge et renvoie le module .py voisin `module_name` (sans extension)."""
+    path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), module_name + ".py"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
-# ── build_displaced_sirene_layer ──────────────────────────────────────────────
-_sd_spec = importlib.util.spec_from_file_location(
-    "sirene_display",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_display.py"),
-)
-_sd_mod = importlib.util.module_from_spec(_sd_spec)
-_sd_spec.loader.exec_module(_sd_mod)
-build_displaced_sirene_layer = _sd_mod.build_displaced_sirene_layer
-del _sd_spec, _sd_mod
 
-# ── build_activity_layers (Bâti par activité SIRENE) ─────────────────────────
-_sb_spec = importlib.util.spec_from_file_location(
-    "sirene_buildings",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "sirene_buildings.py"),
-)
-_sb_mod = importlib.util.module_from_spec(_sb_spec)
-_sb_spec.loader.exec_module(_sb_mod)
-build_activity_layers = _sb_mod.build_activity_layers
-del _sb_spec, _sb_mod
+_mod = _load_sibling("fdp_par_commune")
+FDPParCommune = _mod.FDPParCommune
+_LayerSelectorDialog = _mod._LayerSelectorDialog
+
+build_displaced_sirene_layer = _load_sibling("sirene_display").build_displaced_sirene_layer
+build_activity_layers = _load_sibling("sirene_buildings").build_activity_layers
+del _mod
 
 # Codes INSEE des communes-mères PLM (établissements stockés sous arrondissements)
 _PLM_PARENT_CODES = {"75056", "69123", "13055"}
