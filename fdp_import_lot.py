@@ -79,24 +79,36 @@ class FDPImportEnLot(FDPParCommune):
         ok_count   = 0
         skip_count = 0
 
-        for i, nom_input in enumerate(names):
+        # ── 1. Résoudre toutes les communes (API Géo) avant l'import ──────────
+        resolved = []
+        for nom_input in names:
             if feedback.isCanceled():
                 break
-
-            feedback.pushInfo(f"\n[{i + 1}/{total}]  Recherche de « {nom_input} »…")
-            feedback.setProgress(int(100 * i / total))
-
+            feedback.pushInfo(f"🔎  Recherche de « {nom_input} »…")
             commune = self._lookup_commune_batch(
                 nom_input, None, feedback, warn_on_miss=True
             )
             if commune is None:
                 skip_count += 1
                 continue
+            resolved.append(commune)
+
+        # ── 2. Pré-chargement SIRENE en un seul balayage (si SIRENE demandé) ──
+        # Évite de rebalayer le parquet national par commune (voir docs/PERF.md).
+        if resolved and any(e["style_key"] == "sirene" for e in selected_entries):
+            self._prefetch_sirene([c["code"] for c in resolved], feedback)
+
+        # ── 3. Import de chaque commune ───────────────────────────────────────
+        total_ok = len(resolved)
+        for i, commune in enumerate(resolved):
+            if feedback.isCanceled():
+                break
 
             nom   = commune["nom"]
             insee = commune["code"]
             dep   = self._get_dep(insee)
-            feedback.pushInfo(f"   📍 {nom} ({dep}) — INSEE {insee}")
+            feedback.pushInfo(f"\n[{i + 1}/{total_ok}]  {nom} ({dep}) — INSEE {insee}")
+            feedback.setProgress(int(100 * i / max(total_ok, 1)))
 
             try:
                 self._run_commune_import(

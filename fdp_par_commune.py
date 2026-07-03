@@ -1837,6 +1837,126 @@ class FDPParCommune(QgsProcessingAlgorithm):
             )
             return False
 
+    # Colonnes lues dans StockEtablissement — partagées par _load_sirene et
+    # _prefetch_sirene (doivent rester identiques pour que le filtrage en mémoire
+    # du lot pré-chargé expose exactement les mêmes colonnes).
+    _SIRENE_STOCK_COLS = [
+        "siret",
+        "codeCommuneEtablissement",
+        "etatAdministratifEtablissement",
+        "activitePrincipaleEtablissement",
+        "enseigne1Etablissement",
+        "denominationUsuelleEtablissement",
+        "numeroVoieEtablissement",
+        "indiceRepetitionEtablissement",
+        "typeVoieEtablissement",
+        "libelleVoieEtablissement",
+        "codePostalEtablissement",
+        "libelleCommuneEtablissement",
+    ]
+
+    def _sirene_read(self, cache_file, columns, commune_col, insee_codes,
+                     extra_filters, memo_key, label, feedback):
+        """
+        Lit une table SIRENE (colonnes `columns`) filtrée par commune.
+
+        Si un lot a été pré-chargé (self._sirene_batch) et qu'il couvre TOUTES
+        les communes demandées, filtre ce lot en mémoire au lieu de rebalayer le
+        parquet (import en lot — voir docs/PERF.md). Sinon lit depuis le disque,
+        comportement identique à l'import mono-commune.
+
+        Renvoie la table pyarrow, ou None (erreur signalée).
+        """
+        import pyarrow.parquet as pq
+
+        batch = getattr(self, "_sirene_batch", None)
+        if (batch is not None and memo_key in batch
+                and set(insee_codes) <= batch["codes"]):
+            import pyarrow as pa
+            import pyarrow.compute as pc
+
+            tbl = batch[memo_key]
+            mask = pc.is_in(tbl.column(commune_col), value_set=pa.array(insee_codes))
+            return tbl.filter(mask)
+
+        if len(insee_codes) == 1:
+            dnf = [(commune_col, "=", insee_codes[0])]
+        else:
+            dnf = [(commune_col, "in", insee_codes)]
+        try:
+            return pq.read_table(cache_file, columns=columns, filters=dnf + extra_filters)
+        except Exception as e:
+            feedback.reportError(
+                f"SIRENE — lecture {label} : {e}\n{traceback.format_exc()}",
+                fatalError=False,
+            )
+            return None
+
+    def _prefetch_sirene(self, all_codes, feedback):
+        """
+        Pré-charge en UN seul balayage les données SIRENE de tout un lot de
+        communes (au lieu d'un balayage du parquet par commune — voir docs/PERF.md).
+        Peuple self._sirene_batch ; _load_sirene/_sirene_read filtrent ensuite
+        chaque commune en mémoire.
+
+        Les communes PLM (Paris/Lyon/Marseille entières → codes arrondissement)
+        sont exclues et lues à la demande. Silencieusement ignoré si aucun cache
+        local n'est présent (le téléchargement sera géré par commune).
+        """
+        import pyarrow.parquet as pq
+
+        _PLM = {"75056", "69123", "13055"}
+        codes = sorted({c for c in all_codes if c and c not in _PLM})
+        if len(codes) < 2:
+            return  # rien à gagner sous 2 communes
+
+        # Chemins de cache — DOIVENT correspondre à ceux de _load_sirene.
+        cache_dir   = os.path.join(os.path.expanduser("~"), ".sirene")
+        stock_cache = os.path.join(cache_dir, "StockEtablissement.parquet")
+        geo_cache   = os.path.join(cache_dir, "GeolocEtablissement.parquet")
+        if not os.path.exists(stock_cache):
+            return
+
+        try:
+            schema = set(pq.ParquetFile(stock_cache).schema_arrow.names)
+        except Exception:
+            return
+        legacy = "coordonneeLambertAbscisseEtablissement" in schema
+
+        stock_cols = list(self._SIRENE_STOCK_COLS)
+        if legacy:
+            stock_cols += [
+                "coordonneeLambertAbscisseEtablissement",
+                "coordonneeLambertOrdonneeEtablissement",
+            ]
+
+        feedback.pushInfo(
+            f"   ⚡  Pré-chargement SIRENE — {len(codes)} communes en un balayage…"
+        )
+        batch = {"codes": set(codes)}
+        try:
+            batch["stock"] = pq.read_table(
+                stock_cache,
+                columns=stock_cols,
+                filters=[
+                    ("codeCommuneEtablissement", "in", codes),
+                    ("etatAdministratifEtablissement", "=", "A"),
+                ],
+            )
+            if not legacy and os.path.exists(geo_cache):
+                # PLG_CODE_COMMUNE inclus : sert au filtrage en mémoire par commune.
+                batch["geoloc"] = pq.read_table(
+                    geo_cache,
+                    columns=["SIRET", "X", "Y", "EPSG", "PLG_CODE_COMMUNE"],
+                    filters=[("PLG_CODE_COMMUNE", "in", codes)],
+                )
+        except Exception as e:
+            feedback.pushWarning(
+                f"⚠  Pré-chargement SIRENE ignoré ({e}) — lecture par commune."
+            )
+            return
+        self._sirene_batch = batch
+
     def _load_sirene(
         self,
         insee: str,
@@ -1881,21 +2001,6 @@ class FDPParCommune(QgsProcessingAlgorithm):
             "geolocalisation-des-etablissements-du-repertoire-sirene-pour-les-etudes-statistiques/"
             "20260621-112946/geoloc-geolocalisationetablissement-sirene-pour-etudes-statistiques-parquet.parquet"
         )
-
-        _STOCK_COLS = [
-            "siret",
-            "codeCommuneEtablissement",
-            "etatAdministratifEtablissement",
-            "activitePrincipaleEtablissement",
-            "enseigne1Etablissement",
-            "denominationUsuelleEtablissement",
-            "numeroVoieEtablissement",
-            "indiceRepetitionEtablissement",
-            "typeVoieEtablissement",
-            "libelleVoieEtablissement",
-            "codePostalEtablissement",
-            "libelleCommuneEtablissement",
-        ]
 
         # ── StockEtablissement : réutiliser un ancien fichier fusionné s'il ──
         #    existe déjà (il contient les coordonnées), sinon (re)télécharger le
@@ -1978,29 +2083,18 @@ class FDPParCommune(QgsProcessingAlgorithm):
         )
         feedback.pushInfo(f"   🔍  Filtrage SIRENE commune {label}…")
 
-        def _commune_filter(col):
-            if len(insee_codes) == 1:
-                return [(col, "=", insee_codes[0])]
-            return [(col, "in", insee_codes)]
-
-        stock_cols = list(_STOCK_COLS)
+        stock_cols = list(self._SIRENE_STOCK_COLS)
         if legacy_geo:
             stock_cols += [
                 "coordonneeLambertAbscisseEtablissement",
                 "coordonneeLambertOrdonneeEtablissement",
             ]
-        try:
-            table = pq.read_table(
-                _STOCK_CACHE,
-                columns=stock_cols,
-                filters=_commune_filter("codeCommuneEtablissement")
-                + [("etatAdministratifEtablissement", "=", "A")],
-            )
-        except Exception as e:
-            feedback.reportError(
-                f"SIRENE — lecture StockEtablissement : {e}\n{traceback.format_exc()}",
-                fatalError=False,
-            )
+        table = self._sirene_read(
+            _STOCK_CACHE, stock_cols, "codeCommuneEtablissement", insee_codes,
+            [("etatAdministratifEtablissement", "=", "A")], "stock",
+            "StockEtablissement", feedback,
+        )
+        if table is None:
             return None
 
         # ── Colonnes attributaires en listes Python ──────────────────────────
@@ -2032,17 +2126,11 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 return None
             if feedback.isCanceled():
                 return None
-            try:
-                geo = pq.read_table(
-                    _GEO_CACHE,
-                    columns=["SIRET", "X", "Y", "EPSG"],
-                    filters=_commune_filter("PLG_CODE_COMMUNE"),
-                )
-            except Exception as e:
-                feedback.reportError(
-                    f"SIRENE — lecture Géolocalisation : {e}\n{traceback.format_exc()}",
-                    fatalError=False,
-                )
+            geo = self._sirene_read(
+                _GEO_CACHE, ["SIRET", "X", "Y", "EPSG"], "PLG_CODE_COMMUNE",
+                insee_codes, [], "geoloc", "Géolocalisation", feedback,
+            )
+            if geo is None:
                 return None
             coords = {
                 s: (x, y)
