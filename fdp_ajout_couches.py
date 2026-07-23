@@ -8,6 +8,8 @@ Apparaît dans la boîte à outils Processing comme :
 Pour chaque groupe à la racine du projet (= commune déjà importée) :
   - ré-interroge l'API Géo pour obtenir l'emprise et le code INSEE
   - charge les couches sélectionnées qui ne sont pas encore présentes
+  - charge la topographie (WFS ou LiDAR HD) si demandée et absente —
+    sélectionnable seule, sans aucune autre couche
   - pour SIRENE, utilise la première couche polygone du groupe comme bâtiments
 """
 
@@ -23,6 +25,7 @@ from qgis.core import (
     QgsProject,
     QgsVectorLayer,
 )
+from qgis.PyQt.QtGui import QPainter
 from qgis.PyQt.QtWidgets import QDialog
 
 # ── Chargement des modules voisins (pas de __package__ en script Processing) ──
@@ -86,8 +89,9 @@ class FDPAjoutCouches(FDPParCommune):
         if dlg.exec_() != QDialog.Accepted:
             raise Exception("Annulé.")
         selected_entries = dlg.result_layers
-        if not selected_entries:
-            raise Exception("Aucune couche sélectionnée.")
+        topo_config = dlg.topo_config
+        if not selected_entries and not topo_config:
+            raise Exception("Aucune couche ni topographie sélectionnée.")
 
         sirene_entry = next((e for e in selected_entries if e["style_key"] == "sirene"), None)
         wfs_entries  = [e for e in selected_entries if e["typename"] is not None]
@@ -221,6 +225,58 @@ class FDPAjoutCouches(FDPParCommune):
                             any_added = True
                     except Exception as e:
                         feedback.reportError(f"   ⚠  SIRENE : {e}", fatalError=False)
+
+            # ── Topographie ───────────────────────────────────────────────────
+            if topo_config and not feedback.isCanceled():
+                has_topo = (
+                    any(g.name() == "Topographie" for g in group.findGroups())
+                    or any(n.startswith("Courbes de niveau") for n in existing_names)
+                    or "Ombrage du relief" in existing_names
+                )
+                if has_topo:
+                    feedback.pushInfo("   ↷  Topographie déjà présente.")
+                else:
+                    try:
+                        feedback.pushInfo("   ⛰  Topographie…")
+                        topo_layer = None
+                        hillshade_layer = None
+                        if topo_config["mode"] == "wfs":
+                            topo_layer = self._load_topo_wfs(
+                                bbox, boundary_layer, crs_2154, feedback
+                            )
+                        else:
+                            topo_layer, hillshade_layer = self._load_topo_lidar(
+                                bbox,
+                                boundary_layer,
+                                crs_2154,
+                                topo_config["interval"],
+                                topo_config.get("z_factor", 1.5),
+                                topo_config.get("azimuth", 315),
+                                feedback,
+                            )
+                        if topo_layer:
+                            self._apply_courbe_de_niveau_style(topo_layer)
+                            feedback.pushInfo(
+                                f"   ✓  {topo_layer.featureCount()} courbe(s)"
+                            )
+                        if topo_layer or hillshade_layer:
+                            # Sommet de la légende, comme dans l'import initial.
+                            topo_grp = group.insertGroup(0, "Topographie")
+                            if topo_layer:
+                                QgsProject.instance().addMapLayer(topo_layer, False)
+                                topo_grp.addLayer(topo_layer)
+                            if hillshade_layer:
+                                hillshade_layer.setBlendMode(
+                                    QPainter.CompositionMode_Overlay
+                                )
+                                hillshade_layer.brightnessFilter().setBrightness(-50)
+                                QgsProject.instance().addMapLayer(hillshade_layer, False)
+                                topo_grp.addLayer(hillshade_layer)
+                            any_added = True
+                    except Exception as e:
+                        feedback.reportError(
+                            f"   ⚠  Topographie : {e}", fatalError=False
+                        )
 
             if any_added:
                 ok_count += 1

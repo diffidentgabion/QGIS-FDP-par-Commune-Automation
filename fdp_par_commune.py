@@ -1273,14 +1273,15 @@ class FDPParCommune(QgsProcessingAlgorithm):
         group.setCustomProperty("fdp_insee", insee)
 
         # Topographie : ajoutée en premier enfant → position 0 = sommet de la légende.
-        # Ordre dans le groupe : courbes au-dessus, hillshade en-dessous (Multiply).
+        # Ordre dans le groupe : courbes au-dessus, hillshade en-dessous (Superposition).
         if topo_layer or hillshade_layer:
             topo_grp = group.addGroup("Topographie")
             if topo_layer:
                 QgsProject.instance().addMapLayer(topo_layer, False)
                 topo_grp.addLayer(topo_layer)
             if hillshade_layer:
-                hillshade_layer.setBlendMode(QPainter.CompositionMode_Multiply)
+                hillshade_layer.setBlendMode(QPainter.CompositionMode_Overlay)
+                hillshade_layer.brightnessFilter().setBrightness(-50)
                 QgsProject.instance().addMapLayer(hillshade_layer, False)
                 topo_grp.addLayer(hillshade_layer)
 
@@ -2291,10 +2292,12 @@ class FDPParCommune(QgsProcessingAlgorithm):
             mem_layer = processing.run(
                 "native:reprojectlayer",
                 {"INPUT": mem_layer, "TARGET_CRS": "EPSG:2154", "OUTPUT": "memory:"},
+                feedback=feedback,
             )["OUTPUT"]
         clipped = processing.run(
             "native:clip",
             {"INPUT": mem_layer, "OVERLAY": boundary_layer, "OUTPUT": "memory:"},
+            feedback=feedback,
         )["OUTPUT"]
         clipped.setName("Établissements SIRENE")
         return clipped
@@ -2543,7 +2546,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         """
         Télécharge le MNT LiDAR HD via une seule requête WMS sur le bbox communal,
         génère les courbes de niveau à l'intervalle demandé et un ombrage du relief
-        (hillshade) en mode Multiply pour donner du relief au fond de plan.
+        (hillshade) en mode Superposition pour donner du relief au fond de plan.
 
         Retourne (contour_layer, hillshade_layer). hillshade_layer est None si
         la génération échoue.
@@ -2614,6 +2617,41 @@ class FDPParCommune(QgsProcessingAlgorithm):
         except Exception as exc:
             feedback.pushWarning(f"   ⚠  Hillshade : {exc}")
             hillshade_rl = None
+
+        # Découpe du hillshade sur la limite communale : en import multi-communes,
+        # les rasters bbox de communes voisines se chevauchent et leurs modes de
+        # fusion se cumulent. Bande alpha → transparent hors commune.
+        # En cas d'échec on garde le hillshade non découpé plutôt que rien.
+        if hillshade_rl is not None:
+            hillshade_clip_path = os.path.join(tmpdir, "hillshade_clip.tif")
+            try:
+                processing.run(
+                    "gdal:cliprasterbymasklayer",
+                    {
+                        "INPUT": hillshade_path,
+                        "MASK": boundary_layer,
+                        "SOURCE_CRS": None,
+                        "TARGET_CRS": None,
+                        "NODATA": None,
+                        "ALPHA_BAND": True,
+                        "CROP_TO_CUTLINE": True,
+                        "KEEP_RESOLUTION": True,
+                        "MULTITHREADING": False,
+                        "OUTPUT": hillshade_clip_path,
+                    },
+                    feedback=feedback,
+                )
+                clipped_rl = QgsRasterLayer(hillshade_clip_path, "Ombrage du relief")
+                if clipped_rl.isValid():
+                    hillshade_rl = clipped_rl
+                else:
+                    feedback.pushWarning(
+                        "   ⚠  Découpe du hillshade invalide — raster bbox conservé."
+                    )
+            except Exception as exc:
+                feedback.pushWarning(
+                    f"   ⚠  Découpe du hillshade : {exc} — raster bbox conservé."
+                )
 
         # ── Courbes de niveau ─────────────────────────────────────────────────
         contour_path = os.path.join(tmpdir, "contours.gpkg")
