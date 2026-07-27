@@ -42,8 +42,28 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.PyQt.QtGui import QColor
 
+import math
+
 _GROUP_NAME    = "Axo"
 _FALLBACK_COLOR = QColor("#B0AECA")
+
+
+def _screen_up_vector():
+    """
+    Unit vector (in map coordinates) pointing to the top of the current
+    map canvas. Canvas rotation is in degrees clockwise, so a view rotated
+    45° clockwise has screen-up pointing northwest. Falls back to plain
+    north (0, 1) when no canvas is available (headless run).
+    """
+    rotation = 0.0
+    try:
+        from qgis.utils import iface
+        if iface is not None and iface.mapCanvas() is not None:
+            rotation = iface.mapCanvas().rotation()
+    except Exception:
+        pass
+    theta = math.radians(rotation)
+    return -math.sin(theta), math.cos(theta), rotation
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -97,7 +117,9 @@ def _color_str(color):
 # ──────────────────────────────────────────────────────────────────────
 
 def _painter_order_by():
-    """ORDER BY sort_y DESC — north buildings underneath, south on top."""
+    """ORDER BY sort_y DESC — buildings toward the top of the view underneath,
+    buildings toward the bottom on top. sort_y is the centroid projected on
+    the screen-up axis, so this holds under canvas rotation too."""
     return QgsFeatureRequest.OrderBy([
         QgsFeatureRequest.OrderByClause("sort_y", ascending=False)
     ])
@@ -184,7 +206,10 @@ class AxonoBatiments(QgsProcessingAlgorithm):
             "d'une ou plusieurs couches polygonales avec les attributs BD TOPO hauteur/nombre_d_etages.\n\n"
             "Chaque couche source produit ses propres couches contours (+ surfaces si activé), "
             "regroupées dans un groupe « Axo ». "
-            "Les bâtiments sont rendus selon un algorithme du peintre (sud devant, nord derrière). "
+            "L'extrusion suit le haut de la vue courante : si le canevas est pivoté, "
+            "les volumes s'élèvent toujours verticalement à l'écran. "
+            "Les bâtiments sont rendus selon un algorithme du peintre "
+            "(bas de la vue devant, haut de la vue derrière). "
             "La couleur est lue depuis la symbologie de chaque couche source, "
             "les façades assombries d'un pourcentage réglable."
         )
@@ -286,6 +311,16 @@ class AxonoBatiments(QgsProcessingAlgorithm):
         line_fields = self._line_fields()
         fill_fields = self._fill_fields()
 
+        # "Up" for the extrusion is the top of the current viewport, not map
+        # north — a view rotated 45° still gets buildings rising straight up
+        # on screen.
+        up_x, up_y, canvas_rotation = _screen_up_vector()
+        if canvas_rotation:
+            feedback.pushInfo(
+                self.tr("Rotation du canevas : {:.1f}° — extrusion vers le haut de la vue.")
+                .format(canvas_rotation)
+            )
+
         total = sum(layer.featureCount() for layer in layers)
         count = 0
 
@@ -362,9 +397,12 @@ class AxonoBatiments(QgsProcessingAlgorithm):
                     effective_height = default_height * exaggeration
 
                 # ── Painter sort key ──────────────────────────────────
-                centroid_y  = geom.centroid().asPoint().y()
-                wall_sort_y = centroid_y + 1.0
-                roof_sort_y = centroid_y
+                # Centroid projected on the screen-up axis: features higher
+                # in the view get a larger key and are drawn first (behind).
+                centroid    = geom.centroid().asPoint()
+                sort_key    = centroid.x() * up_x + centroid.y() * up_y
+                wall_sort_y = sort_key + 1.0
+                roof_sort_y = sort_key
 
                 # ── Line geometry ─────────────────────────────────────
                 multi_ls = QgsMultiLineString()
@@ -380,7 +418,9 @@ class AxonoBatiments(QgsProcessingAlgorithm):
                     ))
 
                     if effective_height > 0:
-                        roof_pts = [QgsPointXY(p.x(), p.y() + effective_height) for p in floor_pts]
+                        dx = up_x * effective_height
+                        dy = up_y * effective_height
+                        roof_pts = [QgsPointXY(p.x() + dx, p.y() + dy) for p in floor_pts]
 
                         multi_ls.addGeometry(QgsLineString(
                             [QgsPoint(p.x(), p.y()) for p in roof_pts]
@@ -436,7 +476,7 @@ class AxonoBatiments(QgsProcessingAlgorithm):
 
                 if line_pr:
                     line_feat = QgsFeature(line_fields)
-                    line_feat["sort_y"] = centroid_y
+                    line_feat["sort_y"] = sort_key
                     line_feat.setGeometry(QgsGeometry(multi_ls))
                     line_pr.addFeature(line_feat)
 

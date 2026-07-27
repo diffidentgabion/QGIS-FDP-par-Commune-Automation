@@ -21,7 +21,7 @@ For each building polygon, generates a flat top-down axonometric volume represen
 
 Memory layer of `QgsMultiLineString` geometries, one feature per input building, same CRS as input. Each feature contains:
 - Floor polygon boundary as a linestring
-- Roof polygon boundary as a linestring (same XY, Y translated up by `hauteur * exaggeration`)
+- Roof polygon boundary as a linestring (same XY, translated by `hauteur * exaggeration` along the screen-up axis — the direction pointing to the top of the current map canvas, accounting for canvas rotation)
 - Only the vertical edges whose top vertex falls outside the roof polygon geometry
 
 ## Algorithm per building
@@ -33,7 +33,9 @@ Memory layer of `QgsMultiLineString` geometries, one feature per input building,
      if hauteur not null and > 0: use hauteur * exaggeration
      elif nombre_d_etages not null and > 0: use nombre_d_etages * fallback_per_floor * exaggeration
      else: use default_height * exaggeration
-4. Build roof vertices: (x, y + effective_height) for each floor vertex
+4. Build roof vertices: floor vertex + effective_height * screen_up for each
+   floor vertex, where screen_up = (-sin θ, cos θ) and θ is the canvas
+   rotation in clockwise degrees (θ = 0 → plain north, headless fallback)
 5. Build roof polygon geometry from roof vertices for the inside test
 6. For each vertical edge (floor_vertex[i] → roof_vertex[i]):
      if QgsGeometry.fromPointXY(roof_vertex[i]).within(roof_polygon):
@@ -59,6 +61,6 @@ Single black `QgsSimpleLineSymbolLayer`, width 0.15mm, applied to the output lay
 
 - Not a true 3D axonometric with a view vector or projection matrix
 - Not solving occlusion between separate buildings — overlapping lines between adjacent buildings are acceptable
-- Not geographically registered in 3D — the Y axis offset is a drawing convention only
+- Not geographically registered in 3D — the screen-up offset is a drawing convention only, baked into the geometry for the canvas rotation at generation time (re-run the tool after rotating the view)
 
 ---
