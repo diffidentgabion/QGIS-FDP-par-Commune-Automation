@@ -307,14 +307,6 @@ _LAYER_CATALOGUE = [
     },
     # ── Couches supplémentaires ───────────────────────────────────────────────
     {
-        "section": "extra",
-        "typename": "BDTOPO_V3:erp",
-        "display_name": "ERP",
-        "style_key": "erp",
-        "geom_type": "point",
-        "checked": False,
-    },
-    {
         "section": "default",
         "typename": "BDTOPO_V3:construction_surfacique",
         "display_name": "Constructions surfaciques",
@@ -343,6 +335,65 @@ _LAYER_CATALOGUE = [
         "typename": "BDTOPO_V3:foret_publique",
         "display_name": "Forêts publiques",
         "style_key": "foret_publique",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "extra",
+        "typename": "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale",
+        "display_name": "Forêt (BD Forêt V2)",
+        "style_key": "bdforet",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    # ── Zonages environnementaux (INPN/PatriNat via Géoplateforme) ───────────
+    # Périmètres réglementaires ou d'inventaire : remplissages très transparents
+    # + contours tiretés, pour se superposer au fond de plan sans le masquer.
+    {
+        "section": "extra",
+        "typename": "patrinat_sic:sic",
+        "display_name": "Natura 2000 — Habitats (SIC/ZSC)",
+        "style_key": "natura_sic",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "extra",
+        "typename": "patrinat_zps:zps",
+        "display_name": "Natura 2000 — Oiseaux (ZPS)",
+        "style_key": "natura_zps",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "extra",
+        "typename": "patrinat_znieff1:znieff1",
+        "display_name": "ZNIEFF type 1",
+        "style_key": "znieff1",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "extra",
+        "typename": "patrinat_znieff2:znieff2",
+        "display_name": "ZNIEFF type 2",
+        "style_key": "znieff2",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "extra",
+        "typename": "patrinat_apb:apb",
+        "display_name": "Protection de biotope (APB)",
+        "style_key": "apb",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "extra",
+        "typename": "patrinat_pnr:pnr",
+        "display_name": "Parc naturel régional",
+        "style_key": "pnr",
         "geom_type": "polygon",
         "checked": False,
     },
@@ -442,26 +493,9 @@ _DEFAULT_STYLES = {
         "outline_width": 0.2,
         "outline_style": "none",
     },
-    "vegetation": {
-        "geom_type": "polygon",
-        "fill_color": QColor(155, 215, 155, 255),
-        "outline_color": QColor("#88bb88"),
-        "outline_width": 0.1,
-        "outline_style": "none",
-    },
-    "rivers": {
-        "geom_type": "line",
-        "line_color": QColor("#3A9BD5"),
-        "line_width": 0.8,
-        "line_style": "solid",
-    },
-    "water_surface": {
-        "geom_type": "polygon",
-        "fill_color": QColor(120, 190, 220, 255),
-        "outline_color": QColor("#3A9BD5"),
-        "outline_width": 0.1,
-        "outline_style": "none",
-    },
+    "vegetation": None,  # rendu règle-par-règle via _apply_vegetation_style (nature)
+    "rivers": None,  # rendu règle-par-règle via _apply_rivers_style (caractere_permanent)
+    "water_surface": None,  # rendu règle-par-règle via _apply_water_surface_style (nature + persistance)
     "parcels": {
         "geom_type": "polygon",
         "fill_color": QColor(224, 224, 224, 255),
@@ -484,11 +518,6 @@ _DEFAULT_STYLES = {
         "outline_style": "solid",
     },
     # ── Couches supplémentaires ───────────────────────────────────────────────
-    "erp": {
-        "geom_type": "point",
-        "marker_color": QColor("#e76f51"),
-        "marker_size": 2.5,
-    },
     "construction_surfacique": None,  # rendu par sublayers via build_construction_surfacique_layers
     "itineraire_autre": {
         "geom_type": "line",
@@ -520,6 +549,51 @@ _DEFAULT_STYLES = {
         "outline_color": QColor("#2E8B57"),
         "outline_width": 0.3,
         "outline_style": "solid",
+    },
+    "bdforet": None,  # rendu règle-par-règle via _apply_bdforet_style (tfv_g11)
+    # ── Zonages environnementaux : remplissage quasi transparent, contour tireté
+    "natura_sic": {
+        "geom_type": "polygon",
+        "fill_color": QColor(46, 139, 87, 40),
+        "outline_color": QColor("#2E8B57"),
+        "outline_width": 0.5,
+        "outline_style": "dashed",
+    },
+    "natura_zps": {
+        "geom_type": "polygon",
+        "fill_color": QColor(70, 130, 180, 40),
+        "outline_color": QColor("#4682B4"),
+        "outline_width": 0.5,
+        "outline_style": "dashed",
+    },
+    "znieff1": {
+        "geom_type": "polygon",
+        "fill_color": QColor(184, 134, 11, 40),
+        "outline_color": QColor("#B8860B"),
+        "outline_width": 0.4,
+        "outline_style": "dashed",
+    },
+    "znieff2": {
+        "geom_type": "polygon",
+        "fill_color": QColor(218, 165, 32, 25),
+        "outline_color": QColor("#DAA520"),
+        "outline_width": 0.4,
+        "outline_style": "dashed",
+    },
+    "apb": {
+        "geom_type": "polygon",
+        "fill_color": QColor(160, 80, 140, 40),
+        "outline_color": QColor("#A0508C"),
+        "outline_width": 0.4,
+        "outline_style": "dashed",
+    },
+    # PNR : périmètres immenses — contour seul, aucun remplissage
+    "pnr": {
+        "geom_type": "polygon",
+        "fill_color": QColor(0, 0, 0, 0),
+        "outline_color": QColor("#2F4F4F"),
+        "outline_width": 0.6,
+        "outline_style": "dashed",
     },
     # ── Couches supplémentaires avancées ──────────────────────────────────────
     "canalisation": {
@@ -2329,6 +2403,18 @@ class FDPParCommune(QgsProcessingAlgorithm):
         if style_key == "courbe_de_niveau":
             self._apply_courbe_de_niveau_style(layer)
             return
+        if style_key == "vegetation":
+            self._apply_vegetation_style(layer)
+            return
+        if style_key == "water_surface":
+            self._apply_water_surface_style(layer)
+            return
+        if style_key == "rivers":
+            self._apply_rivers_style(layer)
+            return
+        if style_key == "bdforet":
+            self._apply_bdforet_style(layer)
+            return
 
         # Chaque entrée est un callable qui renvoie un QgsSymbol configuré.
         # On utilise des lambdas pour éviter de créer des symboles inutilisés.
@@ -2345,27 +2431,6 @@ class FDPParCommune(QgsProcessingAlgorithm):
             "parcels": lambda: QgsFillSymbol.createSimple(
                 {
                     "color": "#e0e0e0",
-                    "outline_style": "no",
-                }
-            ),
-            # Surfaces en eau : bleu clair, sans contour
-            "water_surface": lambda: QgsFillSymbol.createSimple(
-                {
-                    "color": "#aad3df",
-                    "outline_style": "no",
-                }
-            ),
-            # Cours d'eau : ligne bleu moyen
-            "rivers": lambda: QgsLineSymbol.createSimple(
-                {
-                    "color": "#6baed6",
-                    "width": "0.8",
-                }
-            ),
-            # Végétation : vert très pâle, sans contour
-            "vegetation": lambda: QgsFillSymbol.createSimple(
-                {
-                    "color": "#c8e6c4",
                     "outline_style": "no",
                 }
             ),
@@ -2915,6 +2980,135 @@ class FDPParCommune(QgsProcessingAlgorithm):
             fallback_color="#E8E8E8",
             fallback_label="Autre / non classé",
             symbol_props={"outline_color": "#888888", "outline_width": "0.2"},
+        )
+
+    # =========================================================================
+    # Helpers – symbologie végétation & hydrographie
+    # =========================================================================
+
+    def _apply_vegetation_style(self, layer: QgsVectorLayer):
+        """
+        Végétation BDTOPO — une règle par valeur de 'nature' (toutes les
+        catégories restent accessibles dans la légende et filtrables), mais
+        seulement DEUX teintes à l'écran : végétation arborée (vert actuel du
+        fond de plan) et végétation basse/cultivée (vert-jaune pâle). Le rendu
+        global reste donc aussi discret qu'avant la catégorisation.
+        Natures vérifiées sur le WFS (échantillon) : Bois, Haie, Verger, Vigne ;
+        les autres valeurs proviennent de la nomenclature BDTOPO_V3.
+        """
+        _TREE = "#9BD79B"   # vert existant (ancien remplissage unique)
+        _LOW = "#C6E0A5"    # vert-jaune pâle : haies, landes, vignes, vergers…
+        natures = [
+            ("Bois", _TREE),
+            ("Forêt fermée de feuillus", _TREE),
+            ("Forêt fermée de conifères", _TREE),
+            ("Forêt fermée mixte", _TREE),
+            ("Forêt ouverte", _TREE),
+            ("Peupleraie", _TREE),
+            ("Haie", _LOW),
+            ("Lande ligneuse", _LOW),
+            ("Verger", _LOW),
+            ("Vigne", _LOW),
+        ]
+        rules = [
+            (label, color, f"\"nature\" = '{label}'")
+            for label, color in natures
+        ]
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color=_LOW,
+            fallback_label="Autre végétation",
+            symbol_props={"outline_style": "no"},
+        )
+
+    def _apply_water_surface_style(self, layer: QgsVectorLayer):
+        """
+        Surfaces hydrographiques BDTOPO — catégorisation sur 'nature' +
+        'persistance' (valeurs vérifiées sur le WFS : Permanent/Intermittent).
+        Palette : famille de bleus proche de l'ancien remplissage unique ;
+        l'eau intermittente ressort en bleu très pâle.
+        """
+        # Exclusion partagée : l'intermittent est traité par sa propre règle.
+        # coalesce → une persistance NULL est traitée comme permanente.
+        _P = "coalesce(\"persistance\", '') <> 'Intermittent'"
+        rules = [
+            (
+                "Eau intermittente",
+                "#C4E0EE",
+                "coalesce(\"persistance\", '') = 'Intermittent'",
+            ),
+            (
+                "Écoulement naturel",
+                "#78BEDC",
+                f"\"nature\" = 'Ecoulement naturel' AND {_P}",
+            ),
+            (
+                "Plan d'eau / mare",
+                "#8FCAE4",
+                "\"nature\" IN ('Plan d''eau', 'Mare', 'Plan d''eau de gravière', "
+                f"'Lagune', 'Estuaire') AND {_P}",
+            ),
+            (
+                "Retenue / bassin",
+                "#6FB0D0",
+                "\"nature\" IN ('Retenue', 'Réservoir-bassin', "
+                f"'Réservoir-bassin d''orage') AND {_P}",
+            ),
+        ]
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color="#78BEDC",
+            fallback_label="Autre surface en eau",
+            symbol_props={"outline_style": "no"},
+        )
+
+    def _apply_rivers_style(self, layer: QgsVectorLayer):
+        """
+        Cours d'eau BDTOPO — le champ booléen 'caractere_permanent' distingue
+        les cours d'eau intermittents (tiretés, bleu clair). La règle ELSE
+        reprend l'ancien trait unique : tout champ absent ou mal typé retombe
+        donc sur le rendu permanent.
+        """
+        rules = [
+            (
+                "Cours d'eau intermittent",
+                "\"caractere_permanent\" = false",
+                "#7EB8D8",
+                0.5,
+                Qt.DashLine,
+            ),
+            ("Cours d'eau", "ELSE", "#3A9BD5", 0.8),
+        ]
+        _apply_line_rules(layer, rules)
+
+    def _apply_bdforet_style(self, layer: QgsVectorLayer):
+        """
+        BD Forêt V2 (formation_vegetale) — catégorisation sur 'tfv_g11', la
+        généralisation en 11 postes fournie par l'IGN. Les LIKE absorbent les
+        variantes de libellés (« Forêt fermée feuillus » vs « … de feuillus »).
+        Palette de verts cohérente avec la végétation BDTOPO.
+        """
+        rules = [
+            ("Forêt fermée de feuillus", "#8CCD8C",
+             "\"tfv_g11\" LIKE 'Forêt fermée%feuillus'"),
+            ("Forêt fermée de conifères", "#5FA878",
+             "\"tfv_g11\" LIKE 'Forêt fermée%conifères'"),
+            ("Forêt fermée mixte", "#74BC82",
+             "\"tfv_g11\" LIKE 'Forêt fermée mixte'"),
+            ("Forêt fermée sans couvert arboré", "#B0D8A0",
+             "\"tfv_g11\" LIKE 'Forêt fermée sans couvert%'"),
+            ("Forêt ouverte", "#BFE3AC",
+             "\"tfv_g11\" LIKE 'Forêt ouverte%'"),
+            ("Peupleraie", "#7FCDB5", "\"tfv_g11\" = 'Peupleraie'"),
+            ("Lande", "#D8D2A0", "\"tfv_g11\" = 'Lande'"),
+            ("Formation herbacée", "#E4E8B8",
+             "\"tfv_g11\" = 'Formation herbacée'"),
+        ]
+        _apply_fill_rules(
+            layer, rules,
+            fallback_color="#C8E6C4",
+            fallback_label="Autre formation végétale",
+            symbol_props={"outline_style": "no"},
         )
 
     # =========================================================================
