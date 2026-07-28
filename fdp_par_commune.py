@@ -120,7 +120,74 @@ _RPG_ZDH_STAMP = "20250621"
 
 # Ordre du catalogue = ordre initial haut → bas dans la légende QGIS.
 # Chaque entry est un dict figé ; le dialogue en fait une copie mutable.
+# Natures de zone_de_vegetation retirées au chargement : la BD Forêt V2
+# (couche « Forêt (BD Forêt V2) », juste au-dessus dans la légende) couvre ces
+# formations plus finement. Bois, Haie, Lande ligneuse, Verger, Vigne restent.
+_VEGETATION_NATURES_EXCLUES = frozenset(
+    {
+        "Forêt fermée de feuillus",
+        "Forêt fermée de conifères",
+        "Forêt fermée mixte",
+        "Forêt ouverte",
+        "Peupleraie",
+    }
+)
+
 _LAYER_CATALOGUE = [
+    # ── Zonages de protection (INPN/PatriNat via Géoplateforme) ───────────────
+    # Overlays quasi transparents à contour tireté, activés d'un bloc par le
+    # toggle « Zonages de protection » du dialogue. En tête de catalogue : le
+    # toggle les insère en HAUT de la liste d'ordre → rendus au-dessus de tout.
+    # Section prévue pour accueillir d'autres zonages du même type (Géorisques,
+    # zonage PLU…).
+    {
+        "section": "zones",
+        "typename": "patrinat_sic:sic",
+        "display_name": "Natura 2000 — Habitats (SIC/ZSC)",
+        "style_key": "natura_sic",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "zones",
+        "typename": "patrinat_zps:zps",
+        "display_name": "Natura 2000 — Oiseaux (ZPS)",
+        "style_key": "natura_zps",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "zones",
+        "typename": "patrinat_znieff1:znieff1",
+        "display_name": "ZNIEFF type 1",
+        "style_key": "znieff1",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "zones",
+        "typename": "patrinat_znieff2:znieff2",
+        "display_name": "ZNIEFF type 2",
+        "style_key": "znieff2",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "zones",
+        "typename": "patrinat_apb:apb",
+        "display_name": "Protection de biotope (APB)",
+        "style_key": "apb",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    {
+        "section": "zones",
+        "typename": "patrinat_pnr:pnr",
+        "display_name": "Parc naturel régional",
+        "style_key": "pnr",
+        "geom_type": "polygon",
+        "checked": False,
+    },
     # ── Couches par défaut ────────────────────────────────────────────────────
     # Ordre = haut → bas dans la légende (haut = rendu par-dessus)
     {
@@ -136,6 +203,17 @@ _LAYER_CATALOGUE = [
         "typename": "ADMINEXPRESS-COG-CARTO.LATEST:commune",
         "display_name": "Commune",
         "style_key": "commune_boundary",
+        "geom_type": "polygon",
+        "checked": True,
+    },
+    # BD Forêt V2 juste au-dessus de Végétation : les deux se complètent —
+    # la végétation BDTOPO est délestée des natures forestières (voir
+    # _VEGETATION_NATURES_EXCLUES) que la BD Forêt couvre plus finement.
+    {
+        "section": "default",
+        "typename": "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale",
+        "display_name": "Forêt (BD Forêt V2)",
+        "style_key": "bdforet",
         "geom_type": "polygon",
         "checked": True,
     },
@@ -332,73 +410,6 @@ _LAYER_CATALOGUE = [
     },
     {
         "section": "extra",
-        "typename": "BDTOPO_V3:foret_publique",
-        "display_name": "Forêts publiques",
-        "style_key": "foret_publique",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    {
-        "section": "extra",
-        "typename": "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale",
-        "display_name": "Forêt (BD Forêt V2)",
-        "style_key": "bdforet",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    # ── Zonages environnementaux (INPN/PatriNat via Géoplateforme) ───────────
-    # Périmètres réglementaires ou d'inventaire : remplissages très transparents
-    # + contours tiretés, pour se superposer au fond de plan sans le masquer.
-    {
-        "section": "extra",
-        "typename": "patrinat_sic:sic",
-        "display_name": "Natura 2000 — Habitats (SIC/ZSC)",
-        "style_key": "natura_sic",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    {
-        "section": "extra",
-        "typename": "patrinat_zps:zps",
-        "display_name": "Natura 2000 — Oiseaux (ZPS)",
-        "style_key": "natura_zps",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    {
-        "section": "extra",
-        "typename": "patrinat_znieff1:znieff1",
-        "display_name": "ZNIEFF type 1",
-        "style_key": "znieff1",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    {
-        "section": "extra",
-        "typename": "patrinat_znieff2:znieff2",
-        "display_name": "ZNIEFF type 2",
-        "style_key": "znieff2",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    {
-        "section": "extra",
-        "typename": "patrinat_apb:apb",
-        "display_name": "Protection de biotope (APB)",
-        "style_key": "apb",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    {
-        "section": "extra",
-        "typename": "patrinat_pnr:pnr",
-        "display_name": "Parc naturel régional",
-        "style_key": "pnr",
-        "geom_type": "polygon",
-        "checked": False,
-    },
-    {
-        "section": "extra",
         "typename": "BDTOPO_V3:canalisation",
         "display_name": "Canalisation",
         "style_key": "canalisation",
@@ -542,13 +553,6 @@ _DEFAULT_STYLES = {
         "geom_type": "point",
         "marker_color": QColor("#3A9BD5"),
         "marker_size": 2.0,
-    },
-    "foret_publique": {
-        "geom_type": "polygon",
-        "fill_color": QColor(100, 180, 120, 220),
-        "outline_color": QColor("#2E8B57"),
-        "outline_width": 0.3,
-        "outline_style": "solid",
     },
     "bdforet": None,  # rendu règle-par-règle via _apply_bdforet_style (tfv_g11)
     # ── Zonages environnementaux : remplissage quasi transparent, contour tireté
@@ -1371,6 +1375,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         _AEROPORT_KEYS = {"aerodrome", "piste_d_aerodrome"}
         _OUTDOOR_EXTRA_KEYS = {"terrain_de_sport", "cimetiere"}
         _HYDRO_KEYS = {"water_surface", "rivers", "reservoir"}
+        _ZONES_KEYS = {"natura_sic", "natura_zps", "znieff1", "znieff2", "apb", "pnr"}
         rpg_grp = None  # créé à la demande au premier passage d'une couche RPG
         parcels_layer_deferred = (
             None  # ajouté à rpg_grp EN DERNIER (sous toutes les couches agri)
@@ -1382,6 +1387,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
         hydro_grp = None  # créé à la demande au premier passage d'une couche hydro
         transport_grp = None  # créé à la demande pour les équipements de transport
         constr_grp = None  # créé à la demande pour les constructions surfaciques
+        # Zonages de protection : en tête de la liste d'ordre → le sous-groupe
+        # est créé en premier et apparaît donc en haut de la légende.
+        zones_grp = None  # créé à la demande pour les zonages de protection
 
         for entry in selected_entries:
             sk = entry["style_key"]
@@ -1494,7 +1502,11 @@ class FDPParCommune(QgsProcessingAlgorithm):
             QgsProject.instance().addMapLayer(layer, False)
 
             # ── Routage vers sous-groupe ──────────────────────────────────────
-            if sk in _HYDRO_KEYS:
+            if sk in _ZONES_KEYS:
+                if zones_grp is None:
+                    zones_grp = group.addGroup("Zonages de protection")
+                zones_grp.addLayer(layer)
+            elif sk in _HYDRO_KEYS:
                 # Hydrographie (surface, cours d'eau, réservoir) → groupe dédié.
                 if hydro_grp is None:
                     hydro_grp = group.addGroup("Hydrographie")
@@ -1837,6 +1849,24 @@ class FDPParCommune(QgsProcessingAlgorithm):
             feedback=feedback,
         )["OUTPUT"]
         clipped.setName(display_name)
+
+        # La végétation BDTOPO fait doublon avec la BD Forêt V2 sur les
+        # formations forestières : ces natures sont retirées de la couche
+        # (la BD Forêt, plus fine et catégorisée, les couvre). Fait ici, dans
+        # le chargeur partagé, pour que fdp_ajout_couches en bénéficie aussi.
+        if typename == "BDTOPO_V3:zone_de_vegetation":
+            ids = [
+                f.id()
+                for f in clipped.getFeatures()
+                if f["nature"] in _VEGETATION_NATURES_EXCLUES
+            ]
+            if ids:
+                clipped.dataProvider().deleteFeatures(ids)
+                feedback.pushInfo(
+                    f"   ✂  Végétation : {len(ids)} entité(s) forestière(s) "
+                    "retirée(s) (couvertes par la BD Forêt V2)"
+                )
+
         return clipped
 
     # Garde-fou : au-delà de ce nombre d'entités, le filtre code_insee n'a
@@ -2993,18 +3023,14 @@ class FDPParCommune(QgsProcessingAlgorithm):
         seulement DEUX teintes à l'écran : végétation arborée (vert actuel du
         fond de plan) et végétation basse/cultivée (vert-jaune pâle). Le rendu
         global reste donc aussi discret qu'avant la catégorisation.
-        Natures vérifiées sur le WFS (échantillon) : Bois, Haie, Verger, Vigne ;
-        les autres valeurs proviennent de la nomenclature BDTOPO_V3.
+        Les natures forestières sont absentes de la couche : retirées au
+        chargement (_VEGETATION_NATURES_EXCLUES) car couvertes par la
+        BD Forêt V2.
         """
         _TREE = "#9BD79B"   # vert existant (ancien remplissage unique)
         _LOW = "#C6E0A5"    # vert-jaune pâle : haies, landes, vignes, vergers…
         natures = [
             ("Bois", _TREE),
-            ("Forêt fermée de feuillus", _TREE),
-            ("Forêt fermée de conifères", _TREE),
-            ("Forêt fermée mixte", _TREE),
-            ("Forêt ouverte", _TREE),
-            ("Peupleraie", _TREE),
             ("Haie", _LOW),
             ("Lande ligneuse", _LOW),
             ("Verger", _LOW),
@@ -3470,6 +3496,16 @@ class _LayerSelectorDialog(QDialog):
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(6, 6, 6, 6)
 
+        self._build_section(
+            scroll_layout,
+            "Zonages de protection",
+            "zones",
+            collapsible=True,
+            checkbox_all=True,
+            insert_at_top=True,
+            note="Périmètres réglementaires et d'inventaire (Natura 2000, ZNIEFF, "
+            "APB, PNR), rendus au-dessus du fond de plan.",
+        )
         self._build_section(scroll_layout, "Fond de plan", "default", collapsible=False)
         self._build_section(
             scroll_layout,
@@ -3603,9 +3639,21 @@ class _LayerSelectorDialog(QDialog):
         return group
 
     def _build_section(
-        self, parent_layout, title, section, collapsible, note=None, checkbox_all=False
+        self,
+        parent_layout,
+        title,
+        section,
+        collapsible,
+        note=None,
+        checkbox_all=False,
+        insert_at_top=False,
     ):
-        """Construit un QGroupBox avec les checkboxes de la section donnée."""
+        """
+        Construit un QGroupBox avec les checkboxes de la section donnée.
+        `insert_at_top` (avec checkbox_all) : le toggle insère les couches en
+        TÊTE de la liste d'ordre (rendu au-dessus de tout) au lieu de la fin —
+        utilisé par les zonages de protection.
+        """
         entries = [e for e in _LAYER_CATALOGUE if e["section"] == section]
         group = QGroupBox(title)
         group_vbox = QVBoxLayout(group)
@@ -3631,18 +3679,21 @@ class _LayerSelectorDialog(QDialog):
             container.setVisible(False)
             group.toggled.connect(container.setVisible)
 
-            def _on_rural_toggled(checked, _entries=entries):
-                for e in _entries:
+            def _on_group_toggled(checked, _entries=entries, _top=insert_at_top):
+                # insert_at_top : les entrées gardent l'ordre du catalogue en
+                # tête de liste (lignes 0..n) ; sinon ajout en fin (comportement
+                # historique des sections Agriculture / Données thématiques).
+                for i, e in enumerate(_entries):
                     if checked:
                         if not any(
                             self._order_list.item(j).data(Qt.UserRole) == e["style_key"]
                             for j in range(self._order_list.count())
                         ):
-                            self._add_to_order(e)
+                            self._add_to_order(e, row=i if _top else None)
                     else:
                         self._remove_from_order(e["style_key"])
 
-            group.toggled.connect(_on_rural_toggled)
+            group.toggled.connect(_on_group_toggled)
             parent_layout.addWidget(group)
             return
 
@@ -3693,10 +3744,14 @@ class _LayerSelectorDialog(QDialog):
             if entry["checked"]:
                 self._add_to_order(entry)
 
-    def _add_to_order(self, entry):
+    def _add_to_order(self, entry, row=None):
+        """Ajoute la couche en fin de liste, ou à la ligne `row` si fournie."""
         item = QListWidgetItem(entry["display_name"])
         item.setData(Qt.UserRole, entry["style_key"])
-        self._order_list.addItem(item)
+        if row is None:
+            self._order_list.addItem(item)
+        else:
+            self._order_list.insertItem(row, item)
 
     def _remove_from_order(self, style_key):
         for i in range(self._order_list.count()):
