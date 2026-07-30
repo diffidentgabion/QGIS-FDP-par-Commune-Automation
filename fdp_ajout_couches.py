@@ -43,6 +43,7 @@ def _load_sibling(module_name):
 _mod = _load_sibling("fdp_par_commune")
 FDPParCommune = _mod.FDPParCommune
 _LayerSelectorDialog = _mod._LayerSelectorDialog
+_LEGACY_DISPLAY_NAMES = _mod._LEGACY_DISPLAY_NAMES
 
 build_displaced_sirene_layer = _load_sibling("sirene_display").build_displaced_sirene_layer
 build_activity_layers = _load_sibling("sirene_buildings").build_activity_layers
@@ -154,7 +155,12 @@ class FDPAjoutCouches(FDPParCommune):
             for entry in wfs_entries:
                 if feedback.isCanceled():
                     break
-                if entry["display_name"] in existing_names:
+                # Reconnaître aussi les anciens libellés (« Végétation »,
+                # « Forêt (BD Forêt V2) »…) pour ne pas recharger en doublon.
+                known_names = {entry["display_name"]} | _LEGACY_DISPLAY_NAMES.get(
+                    entry["display_name"], frozenset()
+                )
+                if known_names & existing_names:
                     feedback.pushInfo(f"   ↷  {entry['display_name']} déjà présent.")
                     continue
                 try:

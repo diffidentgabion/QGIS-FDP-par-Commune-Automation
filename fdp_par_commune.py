@@ -121,8 +121,8 @@ _RPG_ZDH_STAMP = "20250621"
 # Ordre du catalogue = ordre initial haut → bas dans la légende QGIS.
 # Chaque entry est un dict figé ; le dialogue en fait une copie mutable.
 # Natures de zone_de_vegetation retirées au chargement : la BD Forêt V2
-# (couche « Forêt (BD Forêt V2) », juste au-dessus dans la légende) couvre ces
-# formations plus finement. Bois, Haie, Lande ligneuse, Verger, Vigne restent.
+# (couche « Végétation haute ») couvre ces formations plus finement
+# (les landes via son poste tfv_g11 « Lande »). Bois, Haie, Verger, Vigne restent.
 _VEGETATION_NATURES_EXCLUES = frozenset(
     {
         "Forêt fermée de feuillus",
@@ -130,8 +130,17 @@ _VEGETATION_NATURES_EXCLUES = frozenset(
         "Forêt fermée mixte",
         "Forêt ouverte",
         "Peupleraie",
+        "Lande ligneuse",
     }
 )
+
+# Anciens libellés → libellé actuel. Permet à « Ajout aux communes
+# existantes » de reconnaître les couches importées avant le renommage
+# et d'éviter de les recharger en doublon sous le nouveau nom.
+_LEGACY_DISPLAY_NAMES = {
+    "Végétation haute": frozenset({"Forêt (BD Forêt V2)"}),
+    "Végétation basse": frozenset({"Végétation"}),
+}
 
 _LAYER_CATALOGUE = [
     # ── Zonages de protection (INPN/PatriNat via Géoplateforme) ───────────────
@@ -206,22 +215,14 @@ _LAYER_CATALOGUE = [
         "geom_type": "polygon",
         "checked": True,
     },
-    # BD Forêt V2 juste au-dessus de Végétation : les deux se complètent —
-    # la végétation BDTOPO est délestée des natures forestières (voir
-    # _VEGETATION_NATURES_EXCLUES) que la BD Forêt couvre plus finement.
+    # Végétation haute (BD Forêt V2) et Végétation basse (BDTOPO) se
+    # complètent : la végétation BDTOPO est délestée des natures forestières
+    # (voir _VEGETATION_NATURES_EXCLUES) que la BD Forêt couvre plus finement.
     {
         "section": "default",
         "typename": "LANDCOVER.FORESTINVENTORY.V2:formation_vegetale",
-        "display_name": "Forêt (BD Forêt V2)",
+        "display_name": "Végétation haute",
         "style_key": "bdforet",
-        "geom_type": "polygon",
-        "checked": True,
-    },
-    {
-        "section": "default",
-        "typename": "BDTOPO_V3:zone_de_vegetation",
-        "display_name": "Végétation",
-        "style_key": "vegetation",
         "geom_type": "polygon",
         "checked": True,
     },
@@ -247,6 +248,14 @@ _LAYER_CATALOGUE = [
         "display_name": "Voie ferrée",
         "style_key": "railways",
         "geom_type": "line",
+        "checked": True,
+    },
+    {
+        "section": "default",
+        "typename": "BDTOPO_V3:zone_de_vegetation",
+        "display_name": "Végétation basse",
+        "style_key": "vegetation",
+        "geom_type": "polygon",
         "checked": True,
     },
     {
@@ -1435,7 +1444,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
             # ── Sous-groupes programmatiques ─────────────────────────────────
             if sk == "buildings":
-                # Données statistiques EN PREMIER → juste sous Végétation dans la légende
+                # Données statistiques EN PREMIER → juste sous Végétation haute dans la légende
                 if bati_stats:
                     bati_data_grp = group.addGroup("Bâti — Données")
                     for b_layer in bati_stats:
@@ -1863,7 +1872,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
             if ids:
                 clipped.dataProvider().deleteFeatures(ids)
                 feedback.pushInfo(
-                    f"   ✂  Végétation : {len(ids)} entité(s) forestière(s) "
+                    f"   ✂  Végétation basse : {len(ids)} entité(s) forestière(s) "
                     "retirée(s) (couvertes par la BD Forêt V2)"
                 )
 
@@ -3028,11 +3037,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
         BD Forêt V2.
         """
         _TREE = "#9BD79B"   # vert existant (ancien remplissage unique)
-        _LOW = "#C6E0A5"    # vert-jaune pâle : haies, landes, vignes, vergers…
+        _LOW = "#C6E0A5"    # vert-jaune pâle : haies, vignes, vergers…
         natures = [
             ("Bois", _TREE),
             ("Haie", _LOW),
-            ("Lande ligneuse", _LOW),
             ("Verger", _LOW),
             ("Vigne", _LOW),
         ]
