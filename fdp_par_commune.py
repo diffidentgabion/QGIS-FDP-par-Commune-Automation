@@ -28,6 +28,7 @@ from qgis.core import (
     QgsGeometry,
     QgsLineSymbol,
     QgsMarkerSymbol,
+    QgsNetworkAccessManager,
     QgsPointXY,
     QgsProcessingAlgorithm,
     QgsProcessingContext,
@@ -44,7 +45,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsColorButton
-from qgis.PyQt.QtCore import QMetaType, Qt
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType, Qt
 from qgis.PyQt.QtGui import QColor, QPainter
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -108,6 +109,10 @@ del _mod
 # =============================================================================
 # Catalogue des couches et styles par défaut
 # =============================================================================
+
+# Point d'entrée WFS Géoplateforme (IGN). Constante de module pour pouvoir le
+# rediriger vers un mandataire local dans les tests.
+_WFS_URL = "https://data.geopf.fr/wfs/ows"
 
 # Millésime des couches RPG épinglées à une édition annuelle. La Géoplateforme
 # publie chaque année de nouvelles couches RPG dont le typename contient l'année.
@@ -1809,6 +1814,111 @@ class FDPParCommune(QgsProcessingAlgorithm):
     # Helper – chargement WFS
     # =========================================================================
 
+    # ── Robustesse du téléchargement WFS ──────────────────────────────────────
+    # Depuis septembre 2026, la passerelle data.geopf.fr (Kong) renvoie
+    # sporadiquement (≈ 1 % des requêtes, au hasard) une page de métriques
+    # Prometheus/JMX (HTTP 200, text/plain) à la place d'une page GML de 5 000
+    # entités — avec « cache-control: private, max-age=1814400 » (21 jours).
+    # Le cache réseau disque de QGIS la conserve donc, et la ressert à toute
+    # requête de la même URL : les trois relances internes du fournisseur WFS
+    # (qui journalise « Erreur lors de l'analyse de la réponse GetFeature »),
+    # une couche recréée, et même le prochain import de la même commune. Le
+    # fournisseur abandonne alors avec « Le téléchargement des entités … a
+    # échoué ou partiellement échoué » — et l'itérateur s'arrête SANS
+    # exception sur les pages déjà reçues. Résultat : couche tronquée en
+    # silence, d'un seul bloc (les pages suivent l'ordre des identifiants, donc
+    # sont groupées géographiquement). Le bâti du Mans fait 19 pages : ~17 %
+    # des imports perdaient « la moitié de la ville », puis la perdaient à
+    # chaque nouvel essai.
+    #
+    # Parade : télécharger ici l'emprise complète (la requête exacte que
+    # native:clip émettra ensuite, servie alors depuis le cache du
+    # fournisseur), lire provider.errors() — indépendant de la langue de QGIS —
+    # et, en cas d'échec, vider le cache réseau puis recréer la couche après
+    # un délai. Après épuisement des tentatives, erreur explicite plutôt que
+    # découpage de données partielles.
+    _WFS_RETRY_DELAYS = (2, 5, 10)  # secondes d'attente avant chaque nouvel essai
+
+    @staticmethod
+    def _wfs_download(layer, rect):
+        """
+        Force le téléchargement complet de `rect` (toute la couche si None)
+        et renvoie (nb_entités, message_d_erreur_ou_None).
+        """
+        provider = layer.dataProvider()
+        provider.clearErrors()
+        request = QgsFeatureRequest()
+        if rect is not None:
+            request.setFilterRect(rect)
+        n = sum(1 for _ in layer.getFeatures(request))
+        # L'erreur du téléchargeur (thread séparé) parvient au fournisseur par
+        # signal différé : dépiler la boucle d'événements avant de la lire.
+        for _ in range(3):
+            QCoreApplication.processEvents()
+            time.sleep(0.05)
+        errors = provider.errors()
+        return n, (errors[-1] if errors else None)
+
+    @staticmethod
+    def _purge_network_cache():
+        """
+        Vide le cache réseau disque de QGIS, qui conserve 21 jours la page
+        corrompue. Un retrait ciblé (cache.remove(QUrl)) n'est pas fiable :
+        la clé ne correspond pas toujours à l'URL journalisée (encodage des
+        apostrophes du filtre CQL des parcelles, notamment). Le cache ne
+        contient que des tuiles (OSM…) et des pages WFS : le vider ne coûte
+        que des re-téléchargements, pour un échec rare (~1 % des requêtes).
+        """
+        cache = QgsNetworkAccessManager.instance().cache()
+        if cache is not None:
+            cache.clear()
+
+    @staticmethod
+    def _sleep_cancellable(seconds, feedback):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not feedback.isCanceled():
+            time.sleep(0.25)
+
+    def _wfs_open(self, uri, display_name, rect, feedback):
+        """
+        Crée la couche WFS `uri` et télécharge `rect` de façon vérifiée, en
+        recréant la couche après un délai si Géoplateforme a renvoyé une
+        réponse corrompue.
+
+        Renvoie (layer, nb_entités) — ou None si la couche reste invalide
+        (typename inconnu…), comme avant. Lève une exception si le
+        téléchargement reste incomplet : jamais de couche partielle.
+        """
+        n_attempts = len(self._WFS_RETRY_DELAYS) + 1
+        problem = None
+        for attempt in range(1, n_attempts + 1):
+            if attempt > 1:
+                delay = self._WFS_RETRY_DELAYS[attempt - 2]
+                feedback.pushWarning(
+                    f"   ⚠  {display_name} — {problem} "
+                    f"(tentative {attempt - 1}/{n_attempts}), "
+                    f"nouvel essai dans {delay} s…"
+                )
+                self._sleep_cancellable(delay, feedback)
+                if feedback.isCanceled():
+                    break
+            layer = QgsVectorLayer(uri, display_name, "WFS")
+            if not layer.isValid():
+                problem = "couche invalide"
+                continue
+            n, error = self._wfs_download(layer, rect)
+            if error is None:
+                return layer, n
+            problem = f"téléchargement incomplet ({error})"
+            self._purge_network_cache()
+
+        if feedback.isCanceled() or problem == "couche invalide":
+            return None
+        raise Exception(
+            f"{display_name} : Géoplateforme WFS en échec après {n_attempts} "
+            f"tentatives — {problem}. Relancer l'import."
+        )
+
     def _load_wfs_layer(
         self,
         typename: str,
@@ -1819,31 +1929,38 @@ class FDPParCommune(QgsProcessingAlgorithm):
         feedback,
     ):
         """
-        Construit l'URI WFS GetFeature avec filtre BBOX, charge la couche,
-        puis la découpe sur le contour communal.
-        Renvoie None (avec avertissement) si la couche est vide ou invalide.
+        Construit l'URI WFS GetFeature avec filtre BBOX, charge la couche
+        (téléchargement complet vérifié, voir _wfs_open), puis la découpe sur
+        le contour communal.
+        Renvoie None (avec avertissement) si la couche est invalide ; lève une
+        exception si Géoplateforme ne livre pas la couche complète.
         """
-        # URI WFS — le paramètre BBOX attend : minX,minY,maxX,maxY,CRS
+        # URI WFS — le paramètre BBOX attend : minX,minY,maxX,maxY,CRS.
+        # NB : le fournisseur WFS de QGIS ne conserve pas la valeur de BBOX
+        # d'une URI de cette forme (il note seulement qu'une restriction
+        # spatiale est demandée) ; l'emprise effectivement téléchargée est
+        # celle du filterRect de la requête — voir _wfs_open et native:clip.
         bbox_str = (
             f"{bbox.xMinimum()},{bbox.yMinimum()},"
             f"{bbox.xMaximum()},{bbox.yMaximum()},EPSG:2154"
         )
         uri = (
-            "https://data.geopf.fr/wfs/ows"
+            f"{_WFS_URL}"
             "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
             f"&TYPENAME={typename}&SRSNAME=EPSG:2154&BBOX={bbox_str}"
         )
 
-        layer = QgsVectorLayer(uri, display_name, "WFS")
-
-        if not layer.isValid():
-            feedback.pushWarning(f"⚠  {display_name} — couche invalide")
+        opened = self._wfs_open(uri, display_name, bbox, feedback)
+        if opened is None:
+            if not feedback.isCanceled():
+                feedback.pushWarning(f"⚠  {display_name} — couche invalide")
             return None
-        if layer.featureCount() == 0:
-            feedback.pushWarning(f"⚠  {display_name} — vide sur la zone")
-            return None
+        layer, n_downloaded = opened
+        feedback.pushInfo(f"   ✓  {n_downloaded} entité(s) téléchargée(s)")
 
-        # Découpage sur le contour communal.
+        # Découpage sur le contour communal. native:clip redemande l'emprise
+        # que _wfs_open vient de télécharger : servie depuis le cache du
+        # fournisseur, sans nouvel aller-retour réseau.
         # Certaines couches WFS (notamment RPG) contiennent des géométries
         # invalides (auto-intersections, doublons de sommets…). On passe un
         # QgsProcessingContext avec GeometrySkipInvalid pour que native:clip
@@ -1903,7 +2020,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         cql = quote(f"code_insee='{insee}'")
         uri = (
-            "https://data.geopf.fr/wfs/ows"
+            f"{_WFS_URL}"
             "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
             f"&TYPENAME={typename}&SRSNAME=EPSG:2154&CQL_FILTER={cql}"
         )
@@ -1914,38 +2031,66 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 typename, display_name, bbox, boundary_layer, crs_2154, feedback
             )
 
+        # Même parade que _wfs_open contre les réponses corrompues de
+        # Géoplateforme : téléchargement vérifié, vidage du cache, nouvelle
+        # couche après délai. Un seul nouvel essai ici : au-delà, le repli
+        # bbox + découpage (parade complète) est préférable à l'attente.
+        n_attempts = 2
+        problem = None
         try:
-            layer = QgsVectorLayer(uri, display_name, "WFS")
-            n = layer.featureCount() if layer.isValid() else 0
-            if n <= 0 or n > self._PARCELLE_MAX:
-                return _fallback(f"filtre code_insee inutilisable (n={n})")
+            for attempt in range(1, n_attempts + 1):
+                if attempt > 1:
+                    delay = self._WFS_RETRY_DELAYS[attempt - 2]
+                    feedback.pushWarning(
+                        f"   ⚠  {display_name} — {problem} "
+                        f"(tentative {attempt - 1}/{n_attempts}), "
+                        f"nouvel essai dans {delay} s…"
+                    )
+                    self._sleep_cancellable(delay, feedback)
+                    if feedback.isCanceled():
+                        break
 
-            # Sécurité : vérifier que le filtre s'applique bien aux ENTITÉS (pas
-            # seulement au comptage). On lit une entité témoin ; si son code_insee
-            # ne correspond pas, le provider ignore le CQL → repli (évite un
-            # téléchargement national qui ferait exploser la mémoire).
-            sample = next(layer.getFeatures(QgsFeatureRequest().setLimit(1)), None)
-            if sample is None or str(sample["code_insee"]) != str(insee):
-                got = None if sample is None else sample["code_insee"]
-                return _fallback(f"filtre non appliqué aux entités (témoin={got})")
+                layer = QgsVectorLayer(uri, display_name, "WFS")
+                n = layer.featureCount() if layer.isValid() else 0
+                if n <= 0 or n > self._PARCELLE_MAX:
+                    return _fallback(f"filtre code_insee inutilisable (n={n})")
 
-            # Matérialisation en mémoire (copie directe, sans découpage géométrique).
-            mem = QgsVectorLayer(
-                f"{QgsWkbTypes.displayString(layer.wkbType())}?crs=EPSG:2154",
-                display_name,
-                "memory",
-            )
-            pr = mem.dataProvider()
-            pr.addAttributes(layer.fields().toList())
-            mem.updateFields()
-            pr.addFeatures(list(layer.getFeatures()))
-            mem.updateExtents()
-            feedback.pushInfo(
-                f"   ✓  {mem.featureCount()} parcelles (filtre code_insee)"
-            )
-            return mem
+                # Sécurité : vérifier que le filtre s'applique bien aux ENTITÉS (pas
+                # seulement au comptage). On lit une entité témoin ; si son code_insee
+                # ne correspond pas, le provider ignore le CQL → repli (évite un
+                # téléchargement national qui ferait exploser la mémoire).
+                sample = next(layer.getFeatures(QgsFeatureRequest().setLimit(1)), None)
+                if sample is None or str(sample["code_insee"]) != str(insee):
+                    got = None if sample is None else sample["code_insee"]
+                    return _fallback(f"filtre non appliqué aux entités (témoin={got})")
+
+                n_downloaded, error = self._wfs_download(layer, None)
+                if error is not None:
+                    problem = f"téléchargement incomplet ({error})"
+                    self._purge_network_cache()
+                    continue
+
+                # Matérialisation en mémoire (copie directe, sans découpage
+                # géométrique) — lue depuis le cache du fournisseur.
+                mem = QgsVectorLayer(
+                    f"{QgsWkbTypes.displayString(layer.wkbType())}?crs=EPSG:2154",
+                    display_name,
+                    "memory",
+                )
+                pr = mem.dataProvider()
+                pr.addAttributes(layer.fields().toList())
+                mem.updateFields()
+                pr.addFeatures(list(layer.getFeatures()))
+                mem.updateExtents()
+                feedback.pushInfo(
+                    f"   ✓  {mem.featureCount()} parcelles (filtre code_insee)"
+                )
+                return mem
         except Exception as e:
             return _fallback(f"voie rapide en erreur ({e})")
+        if feedback.isCanceled():
+            return None
+        return _fallback(f"Géoplateforme en échec après {n_attempts} tentatives ({problem})")
 
     # =========================================================================
     # Helper – SIRENE
