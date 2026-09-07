@@ -165,7 +165,7 @@ helper, called by both. Removes ~30 duplicated lines and a future "fixed it in o
   `fdp_pavillonnaire.py`. They're real, current tools — consider committing them so they're
   versioned like the rest.
 - ⚠ **`fdp_pavillonnaire.py` is NOT superseded by `fdp_bati_dans_zone.py`.** They do different
-  things: pavillonnaire is an *attribute* filter (residential, ≤2 floors) over the already-built
+  things: pavillonnaire is an *attribute* filter (residential, ≤2 floors, ≤2 logements, ≤10 m, 30–400 m² footprint, no mixed use / special nature / light construction) over the already-built
   `Bâti — Résidentiel` layer; bati-dans-zone is a *spatial* containment test against a polygon
   layer. The tool that generalized into bati-dans-zone was `fdp_grand_lyon_zae` (per its own
   tombstone). Keep pavillonnaire unless you've genuinely stopped using its low-rise-housing view.
