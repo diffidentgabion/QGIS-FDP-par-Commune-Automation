@@ -95,6 +95,10 @@ class FDPAjoutCouches(FDPParCommune):
             raise Exception("Aucune couche ni topographie sélectionnée.")
 
         sirene_entry = next((e for e in selected_entries if e["style_key"] == "sirene"), None)
+        # Arbres (OSM) : comme SIRENE, cette couche n'a pas de typename WFS
+        # (source Overpass) — elle est donc absente de wfs_entries et doit être
+        # traitée par son propre bloc plus bas.
+        arbres_entry = next((e for e in selected_entries if e["style_key"] == "osm_arbres"), None)
         wfs_entries  = [e for e in selected_entries if e["typename"] is not None]
 
         crs_4326 = QgsCoordinateReferenceSystem("EPSG:4326")
@@ -118,6 +122,18 @@ class FDPAjoutCouches(FDPParCommune):
             raise Exception("Aucune commune reconnue dans les groupes du projet.")
 
         feedback.pushInfo(f"🗺  {len(commune_nodes)} commune(s) identifiée(s).")
+
+        # Arbres (OSM) : une seule requête Overpass pour tout le lot au lieu
+        # d'une par commune — les instances publiques n'accordent que deux
+        # créneaux par IP et refusent le reste (voir _prefetch_osm_trees).
+        if arbres_entry and len(commune_nodes) > 1:
+            bboxes = []
+            for _grp, c in commune_nodes:
+                try:
+                    bboxes.append(self._commune_bbox(c, xform))
+                except Exception:
+                    pass  # géométrie illisible : cette commune sera traitée seule
+            self._prefetch_osm_trees(bboxes, feedback)
 
         ok_count   = 0
         skip_count = 0
@@ -178,6 +194,24 @@ class FDPAjoutCouches(FDPParCommune):
                     feedback.reportError(
                         f"   ⚠  {entry['display_name']} : {e}", fatalError=False
                     )
+
+            # ── Arbres (OSM) ──────────────────────────────────────────────────
+            if arbres_entry and not feedback.isCanceled():
+                if arbres_entry["display_name"] in existing_names:
+                    feedback.pushInfo("   ↷  Arbres (OSM) déjà présents.")
+                else:
+                    try:
+                        arbres_layer = self._load_osm_trees(
+                            bbox, boundary_layer, crs_2154, feedback
+                        )
+                        if arbres_layer:
+                            self._apply_style(arbres_layer, "osm_arbres")
+                            QgsProject.instance().addMapLayer(arbres_layer, False)
+                            group.addLayer(arbres_layer)
+                            existing_names.add(arbres_layer.name())
+                            any_added = True
+                    except Exception as e:
+                        feedback.reportError(f"   ⚠  Arbres (OSM) : {e}", fatalError=False)
 
             # ── SIRENE ────────────────────────────────────────────────────────
             if sirene_entry and not feedback.isCanceled():

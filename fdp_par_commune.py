@@ -19,6 +19,7 @@ import processing
 import requests
 from osgeo import ogr
 from qgis.core import (
+    QgsBlockingNetworkRequest,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsFeature,
@@ -36,6 +37,7 @@ from qgis.core import (
     QgsProject,
     QgsProperty,
     QgsRasterLayer,
+    QgsRectangle,
     QgsRuleBasedRenderer,
     QgsSimpleLineSymbolLayer,
     QgsSingleSymbolRenderer,
@@ -45,7 +47,8 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsColorButton
-from qgis.PyQt.QtCore import QCoreApplication, QMetaType, Qt
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType, Qt, QUrl, QUrlQuery
+from qgis.PyQt.QtNetwork import QNetworkRequest
 from qgis.PyQt.QtGui import QColor, QPainter
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -113,6 +116,42 @@ del _mod
 # Point d'entrée WFS Géoplateforme (IGN). Constante de module pour pouvoir le
 # rediriger vers un mandataire local dans les tests.
 _WFS_URL = "https://data.geopf.fr/wfs/ows"
+
+# Points d'entrée Overpass (API de requête OpenStreetMap), utilisés par la
+# couche « Arbres (OSM) ». Constante de module comme _WFS_URL, pour pouvoir la
+# rediriger vers un mandataire local dans les tests.
+#
+# Les deux instances publiques généralistes. Elles n'accordent que 2 créneaux
+# simultanés par adresse IP et répondent HTTP 504 (« server too busy ») dès
+# qu'elles saturent : mesuré le 2026-09-08 sur Le Mans et ses voisines,
+# 7 requêtes sur 10 refusées, ~25 s chacune. _overpass_fetch alterne entre les
+# deux, et les chemins par lot regroupent leurs requêtes (_prefetch_osm_trees).
+#
+# Deux instances ont été essayées puis ÉCARTÉES — ne pas les rajouter :
+#   • overpass.osm.ch  : répond 200 en 0,5 s… avec 0 arbre partout en France.
+#     C'est un extrait régional suisse. Une réponse vide et valide est le pire
+#     des cas — aucune erreur, aucune donnée.
+#   • overpass.openstreetmap.fr : rapide (6/6 en 6 s là où overpass-api.de
+#     échouait), mais répond « This service is only available to white-listed
+#     usages » — il filtre par User-Agent et bloque justement celui de QGIS.
+#     Service réservé aux projets OSM-FR : nous n'y avons pas droit.
+_OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
+
+# Délai maximal par requête, en millisecondes (QNetworkRequest.setTransferTimeout).
+# Les requêtes qui aboutissent prennent 1 à 25 s selon la charge du serveur ;
+# au-delà de 45 s il est saturé et n'aboutira pas. Fixé ici plutôt que via le
+# réglage réseau global de QGIS, qu'on ne doit pas modifier dans le dos de
+# l'utilisateur.
+_OVERPASS_TIMEOUT_MS = 45000
+
+# NB : inutile de composer un User-Agent identifiant l'outil — QgsNetworkAccess-
+# Manager écrase systématiquement l'en-tête par celui de QGIS
+# (« Mozilla/5.0 QGIS/34015/… », vérifié). C'est sans conséquence ici : le refus
+# HTTP 406 d'overpass-api.de ne visait que l'agent par défaut de la
+# bibliothèque requests, que nous n'utilisons plus pour ces requêtes.
 
 # Millésime des couches RPG épinglées à une édition annuelle. La Géoplateforme
 # publie chaque année de nouvelles couches RPG dont le typename contient l'année.
@@ -219,6 +258,19 @@ _LAYER_CATALOGUE = [
         "style_key": "commune_boundary",
         "geom_type": "polygon",
         "checked": True,
+    },
+    # Arbres isolés OpenStreetMap (natural=tree) — au-dessus de la Végétation
+    # haute pour que les points restent visibles par-dessus les massifs.
+    # Décochée par défaut : source contributive, donc couverture très inégale
+    # (des dizaines de milliers d'arbres en ville, souvent zéro en rural), et
+    # chaque import ajoute un aller-retour vers Overpass.
+    {
+        "section": "default",
+        "typename": None,  # source Overpass, pas WFS — voir _load_osm_trees
+        "display_name": "Arbres (OSM)",
+        "style_key": "osm_arbres",
+        "geom_type": "point",
+        "checked": False,
     },
     # Végétation haute (BD Forêt V2) et Végétation basse (BDTOPO) se
     # complètent : la végétation BDTOPO est délestée des natures forestières
@@ -569,6 +621,7 @@ _DEFAULT_STYLES = {
         "marker_size": 2.0,
     },
     "bdforet": None,  # rendu règle-par-règle via _apply_bdforet_style (tfv_g11)
+    "osm_arbres": None,  # rendu règle-par-règle via _apply_osm_arbres_style (leaf_type)
     # ── Zonages environnementaux : remplissage quasi transparent, contour tireté
     "natura_sic": {
         "geom_type": "polygon",
@@ -888,6 +941,37 @@ def _apply_fill_rules(layer, rules, fallback_color, fallback_label, symbol_props
         root.appendChild(rule)
     fallback = QgsRuleBasedRenderer.Rule(
         QgsFillSymbol.createSimple({**base, "color": fallback_color})
+    )
+    fallback.setFilterExpression("ELSE")
+    fallback.setLabel(fallback_label)
+    root.appendChild(fallback)
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+    layer.triggerRepaint()
+
+
+def _apply_marker_rules(layer, rules, fallback_color, fallback_label, symbol_props=None):
+    """
+    Applique à `layer` un rendu règle-par-règle de symboles ponctuels + repli ELSE.
+
+    Pendant ponctuel de _apply_fill_rules : mêmes arguments, même structure de
+    règles, un QgsMarkerSymbol au lieu d'un QgsFillSymbol.
+
+    `rules`        : itérable de (label, color, expr).
+    `symbol_props` : propriétés QgsMarkerSymbol communes à toutes les règles
+                     (forme, taille, contour…), fusionnées avec la couleur de
+                     chaque règle.
+    """
+    base = dict(symbol_props or {})
+    root = QgsRuleBasedRenderer.Rule(None)
+    for label, color, expr in rules:
+        rule = QgsRuleBasedRenderer.Rule(
+            QgsMarkerSymbol.createSimple({**base, "color": color})
+        )
+        rule.setFilterExpression(expr)
+        rule.setLabel(label)
+        root.appendChild(rule)
+    fallback = QgsRuleBasedRenderer.Rule(
+        QgsMarkerSymbol.createSimple({**base, "color": fallback_color})
     )
     fallback.setFilterExpression("ELSE")
     fallback.setLabel(fallback_label)
@@ -1321,6 +1405,24 @@ class FDPParCommune(QgsProcessingAlgorithm):
             osm_lyr = QgsRasterLayer(osm_uri, "OpenStreetMap", "wms")
             if osm_lyr.isValid():
                 loaded_layers["osm"] = osm_lyr
+
+        # ── 4e-bis. Arbres isolés OSM (points) ────────────────────────────────
+        # Volontairement indépendant du fond de tuiles OSM ci-dessus : deux
+        # cases distinctes dans le dialogue, deux sources sans rapport (tuiles
+        # raster pré-rendues d'un côté, requête Overpass sur la base OSM de
+        # l'autre). On veut couramment les arbres sans le fond de plan OSM.
+        # Comme SIRENE, cette couche n'a pas de typename WFS : elle est chargée
+        # ici et non dans la boucle wfs_entries.
+        arbres_entry = next(
+            (e for e in selected_entries if e["style_key"] == "osm_arbres"), None
+        )
+        if arbres_entry and not feedback.isCanceled():
+            feedback.pushInfo("🌳  Arbres OpenStreetMap…")
+            arbres_layer = self._load_osm_trees(
+                bbox, boundary_layer, crs_2154, feedback
+            )
+            if arbres_layer:
+                loaded_layers["osm_arbres"] = arbres_layer
 
         # ── 4f. Classification intrinsèque du bâti ───────────────────────────
         bati_stats = []
@@ -1810,6 +1912,16 @@ class FDPParCommune(QgsProcessingAlgorithm):
         layer.updateExtents()
         return layer
 
+    def _commune_bbox(self, commune, xform):
+        """
+        Emprise EPSG:2154 d'une commune de l'API Géo, sans créer de couche.
+        Utilisé par les chemins par lot pour calculer l'emprise groupée des
+        arbres OSM avant d'entrer dans la boucle des communes.
+        """
+        geom = self._geojson_to_qgsgeometry(commune["geometry"])
+        geom.transform(xform)
+        return geom.boundingBox()
+
     # =========================================================================
     # Helper – chargement WFS
     # =========================================================================
@@ -1875,9 +1987,18 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
     @staticmethod
     def _sleep_cancellable(seconds, feedback):
+        """
+        Attente fractionnée qui laisse Qt respirer. Sans processEvents, la
+        fenêtre QGIS reste totalement figée pendant la temporisation — les
+        algorithmes marqués FlagNoThreading tournent dans le thread graphique —
+        et le bouton Annuler ne peut même pas être cliqué : isCanceled() ne
+        devenait donc jamais vrai. _wfs_download dépile déjà les événements de
+        la même façon.
+        """
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline and not feedback.isCanceled():
-            time.sleep(0.25)
+            QCoreApplication.processEvents()
+            time.sleep(0.05)
 
     def _wfs_open(self, uri, display_name, rect, feedback):
         """
@@ -2561,6 +2682,318 @@ class FDPParCommune(QgsProcessingAlgorithm):
         return clipped
 
     # =========================================================================
+    # Helper – arbres isolés OpenStreetMap (API Overpass)
+    # =========================================================================
+
+    # Délais d'attente avant chaque nouvelle tentative Overpass, en secondes.
+    # Volontairement courts, et une tentative de moins que le WFS : chaque essai
+    # peut déjà coûter _OVERPASS_TIMEOUT_MS (45 s), et la tentative suivante
+    # part sur l'AUTRE serveur — si le premier sature, attendre ne change rien.
+    # Coût maximal d'un abandon : 3 × 45 s + 7 s ≈ 2 min 22, une seule fois par
+    # exécution grâce au disjoncteur de _overpass_fetch.
+    _OVERPASS_RETRY_DELAYS = (2, 5)
+
+    # Tags OSM conservés comme attributs de la couche. Les valeurs OSM sont des
+    # chaînes libres (« 12 », « 12 m », « circa 3 »…) : on les stocke telles
+    # quelles, sans conversion numérique. Un parsing strict rejetterait des
+    # entités parfaitement valides pour un gain nul — la couche sert à dessiner,
+    # pas à calculer. Les « : » deviennent « _ » (species:fr → species_fr) pour
+    # rester utilisables sans guillemets dans les expressions QGIS.
+    _OSM_TREE_TAGS = (
+        "leaf_type",
+        "genus",
+        "species",
+        "species:fr",
+        "name",
+        "height",
+        "circumference",
+        "denotation",
+    )
+
+    def _overpass_request(self, url, query, feedback):
+        """
+        Émet UNE requête Overpass et renvoie (code_http, texte, panne).
+        `panne` est None si la réponse est arrivée, sinon un libellé court.
+
+        Seul endroit du chargeur qui touche au réseau — les tests le remplacent
+        pour rejouer les pannes sans serveur.
+
+        On passe par QgsBlockingNetworkRequest et NON par requests.get : ce
+        dernier bloque le thread graphique, et comme les algorithmes
+        FlagNoThreading tournent justement dans ce thread, QGIS était déclaré
+        « ne répond pas » par Windows pendant toute la requête — jusqu'à
+        plusieurs minutes sur un lot de communes, sans même pouvoir annuler.
+        QgsBlockingNetworkRequest attend dans une boucle d'événements Qt
+        imbriquée : la fenêtre continue de se redessiner et le `feedback`
+        transmis permet d'interrompre le transfert en cours.
+        """
+        url_q = QUrl(url)
+        params = QUrlQuery()
+        params.addQueryItem("data", query)
+        url_q.setQuery(params)
+        request = QNetworkRequest(url_q)
+        # Sans cela, une réponse mise en cache par QGIS serait resservie
+        # indéfiniment — le piège déjà rencontré avec les pages GML corrompues
+        # de la Géoplateforme (voir _purge_network_cache).
+        request.setAttribute(
+            QNetworkRequest.CacheLoadControlAttribute, QNetworkRequest.AlwaysNetwork
+        )
+        request.setTransferTimeout(_OVERPASS_TIMEOUT_MS)
+
+        blocking = QgsBlockingNetworkRequest()
+        blocking.get(request, False, feedback)
+        reply = blocking.reply()
+        status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        content = bytes(reply.content())
+
+        # Piège vérifié : quand setTransferTimeout coupe le transfert, get()
+        # renvoie NoError avec un statut None et un corps vide. Se fier au seul
+        # code de retour ferait passer un abandon pour une réussite.
+        if status is None:
+            return None, None, f"délai dépassé (> {_OVERPASS_TIMEOUT_MS // 1000} s)"
+        if status != 200:
+            return status, None, f"HTTP {status}"
+        if not content:
+            return status, None, "réponse vide"
+        return status, content.decode("utf-8", "replace"), None
+
+    def _overpass_fetch(self, query, feedback):
+        """
+        Exécute `query` (Overpass QL) et renvoie la liste des éléments JSON,
+        ou None si les serveurs n'ont rien livré d'exploitable.
+
+        Overpass a les mêmes pièges que le WFS Géoplateforme, plus un qui lui
+        est propre :
+          • il renvoie une page d'erreur HTML là où on attend du JSON ;
+          • surtout, quand une requête dépasse son quota de temps ou de
+            mémoire, il renvoie un JSON parfaitement VALIDE, contenant les
+            éléments déjà collectés, et signale l'incident dans un champ
+            « remark ». Sans le test sur ce champ on chargerait une couche
+            tronquée sans le moindre signe — exactement le piège des pages GML
+            corrompues du WFS (voir _wfs_open).
+
+        Contrairement au WFS, un échec définitif n'interrompt PAS l'import : il
+        journalise un avertissement et renvoie None. Un échec Overpass ne
+        produit aucune couche du tout (jamais une couche partielle d'apparence
+        normale), l'utilisateur le voit donc immédiatement ; perdre tout
+        l'import d'une commune pour une couche d'agrément serait disproportionné.
+        """
+        # Disjoncteur : une fois Overpass déclaré indisponible, on ne le
+        # rappelle plus de toute l'exécution. Sans lui, « Ajout aux communes
+        # existantes » sur vingt communes repayait le coût complet d'un abandon
+        # (≈ 2 min) VINGT fois — c'est ce qui donnait un QGIS figé pendant
+        # trois quarts d'heure. L'attribut est porté par l'instance, que
+        # Processing recrée à chaque exécution (createInstance).
+        if getattr(self, "_overpass_down", False):
+            feedback.pushInfo(
+                "   ↷  Arbres (OSM) : Overpass déjà indisponible sur cette "
+                "exécution — couche ignorée."
+            )
+            return None
+
+        n_attempts = len(self._OVERPASS_RETRY_DELAYS) + 1
+        problem = None
+        for attempt in range(1, n_attempts + 1):
+            if attempt > 1:
+                delay = self._OVERPASS_RETRY_DELAYS[attempt - 2]
+                feedback.pushWarning(
+                    f"   ⚠  Arbres (OSM) — {problem} "
+                    f"(tentative {attempt - 1}/{n_attempts}), "
+                    f"nouvel essai dans {delay} s…"
+                )
+                self._sleep_cancellable(delay, feedback)
+            if feedback.isCanceled():
+                return None
+            # Alternance entre les serveurs : si le premier sature, le suivant
+            # a de bonnes chances d'avoir un créneau libre.
+            url = _OVERPASS_URLS[(attempt - 1) % len(_OVERPASS_URLS)]
+            _status, text, problem = self._overpass_request(url, query, feedback)
+            if feedback.isCanceled():
+                return None
+            if problem is not None:
+                continue
+            try:
+                data = json.loads(text)
+            except ValueError:
+                # Réponse non-JSON : page d'erreur HTML servie avec un statut
+                # 200. L'échec du décodage est le seul indice disponible.
+                problem = "réponse illisible (page d'erreur HTML ?)"
+                continue
+            remark = data.get("remark")
+            if remark:
+                problem = f"réponse partielle ({remark.strip()})"
+                continue
+            return data.get("elements", [])
+
+        if not feedback.isCanceled():
+            self._overpass_down = True
+            feedback.pushWarning(
+                f"⚠  Arbres (OSM) — Overpass en échec après {n_attempts} "
+                f"tentatives ({problem}) : couche ignorée pour toute cette "
+                "exécution, le reste de l'import continue."
+            )
+        return None
+
+    # Surface maximale, en km², d'une emprise regroupée. Au-delà, on renonce au
+    # regroupement : la réponse deviendrait énorme et le serveur public la
+    # refuserait (504) avant même de l'avoir calculée. Le Mans et ses neuf
+    # voisines tiennent dans ~600 km².
+    _OVERPASS_PREFETCH_MAX_KM2 = 2500
+
+    @staticmethod
+    def _osm_trees_query(rect_2154, crs_2154):
+        """
+        Requête Overpass QL couvrant `rect_2154`.
+
+        Overpass raisonne en WGS84 et attend son emprise dans l'ordre
+        Sud,Ouest,Nord,Est — d'où la reprojection. [timeout:60] est le budget
+        que le serveur s'accorde : au-delà il répond « remark », que
+        _overpass_fetch traite comme un échec.
+        """
+        to_4326 = QgsCoordinateTransform(
+            crs_2154, QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance()
+        )
+        r = to_4326.transformBoundingBox(rect_2154)
+        return (
+            "[out:json][timeout:60];"
+            'node["natural"="tree"]'
+            f"({r.yMinimum():.6f},{r.xMinimum():.6f},"
+            f"{r.yMaximum():.6f},{r.xMaximum():.6f});"
+            "out body;"
+        )
+
+    def _osm_trees_layer(self, elements, crs_2154):
+        """Couche mémoire 2154 (NON découpée) construite depuis le JSON Overpass."""
+        to_2154 = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem("EPSG:4326"), crs_2154, QgsProject.instance()
+        )
+        field_names = [t.replace(":", "_") for t in self._OSM_TREE_TAGS]
+        layer = QgsVectorLayer("Point?crs=EPSG:2154", "Arbres (OSM)", "memory")
+        pr = layer.dataProvider()
+        pr.addAttributes(
+            [QgsField("osm_id", QMetaType.Type.LongLong)]
+            + [QgsField(n, QMetaType.Type.QString) for n in field_names]
+        )
+        layer.updateFields()
+
+        features = []
+        for el in elements:
+            lon, lat = el.get("lon"), el.get("lat")
+            if lon is None or lat is None:
+                continue
+            tags = el.get("tags") or {}
+            feat = QgsFeature(layer.fields())
+            feat.setGeometry(
+                QgsGeometry.fromPointXY(to_2154.transform(QgsPointXY(lon, lat)))
+            )
+            feat.setAttribute("osm_id", el.get("id"))
+            for tag, name in zip(self._OSM_TREE_TAGS, field_names):
+                value = tags.get(tag)
+                if value:
+                    feat.setAttribute(name, str(value)[:254])
+            features.append(feat)
+
+        pr.addFeatures(features)
+        layer.updateExtents()
+        layer.dataProvider().createSpatialIndex()
+        return layer
+
+    def _prefetch_osm_trees(self, bboxes, feedback):
+        """
+        Télécharge en UNE SEULE requête les arbres de l'emprise englobant tout
+        le lot ; _load_osm_trees n'a plus ensuite qu'à découper commune par
+        commune, sans retoucher au réseau.
+
+        Sans ce regroupement, « Ajout aux communes existantes » émettait une
+        requête par commune. Les instances Overpass publiques n'accordent que
+        deux créneaux par adresse IP : mesuré le 2026-09-08 sur Le Mans et ses
+        voisines, 7 requêtes sur 10 refusées (HTTP 504) après ~25 s chacune —
+        le lot passait beaucoup plus de temps à réessayer qu'à télécharger.
+        Même esprit que _prefetch_sirene : un seul balayage pour tout le lot.
+
+        Sans effet si les communes sont trop dispersées
+        (> _OVERPASS_PREFETCH_MAX_KM2) : on retombe alors sur une requête par
+        commune, bornée par le disjoncteur de _overpass_fetch.
+        """
+        rects = [b for b in bboxes if b is not None and not b.isEmpty()]
+        if len(rects) < 2:
+            return  # une seule commune : le regroupement n'apporte rien
+        union = QgsRectangle(rects[0])
+        for r in rects[1:]:
+            union.combineExtentWith(r)
+        km2 = (union.width() / 1000.0) * (union.height() / 1000.0)
+        if km2 > self._OVERPASS_PREFETCH_MAX_KM2:
+            feedback.pushInfo(
+                f"🌳  Arbres (OSM) : communes trop dispersées ({km2:.0f} km²) "
+                "— une requête par commune."
+            )
+            return
+
+        feedback.pushInfo(
+            f"🌳  Arbres OpenStreetMap — {len(rects)} communes en une seule "
+            f"requête ({km2:.0f} km²)…"
+        )
+        crs_2154 = QgsCoordinateReferenceSystem("EPSG:2154")
+        elements = self._overpass_fetch(
+            self._osm_trees_query(union, crs_2154), feedback
+        )
+        if elements is None:
+            return
+        layer = self._osm_trees_layer(elements, crs_2154)
+        self._osm_trees_prefetch = (union, layer)
+        feedback.pushInfo(f"   ✓  {layer.featureCount()} arbre(s) pour tout le lot")
+
+    def _load_osm_trees(self, bbox, boundary_layer, crs_2154, feedback):
+        """
+        Arbres isolés OSM (natural=tree) de la commune, découpés sur son
+        contour — même séquence que _load_wfs_layer : emprise large, puis
+        découpage exact.
+
+        Si _prefetch_osm_trees a chargé une emprise groupée qui couvre cette
+        commune, on y puise sans nouvelle requête réseau.
+
+        Renvoie None (avec message) si la requête échoue ou si la commune ne
+        compte aucun arbre cartographié — cas courant en rural, où une couche
+        vide dans la légende n'apprendrait rien à personne.
+        """
+        cache = getattr(self, "_osm_trees_prefetch", None)
+        if cache is not None and cache[0].contains(bbox):
+            mem_layer = cache[1]
+            feedback.pushInfo("   ↷  arbres repris de l'emprise groupée")
+        else:
+            elements = self._overpass_fetch(
+                self._osm_trees_query(bbox, crs_2154), feedback
+            )
+            if elements is None:
+                return None
+            mem_layer = self._osm_trees_layer(elements, crs_2154)
+            feedback.pushInfo(f"   ✓  {mem_layer.featureCount()} arbre(s) téléchargé(s)")
+
+        if mem_layer.featureCount() == 0:
+            feedback.pushInfo(
+                "   ℹ  Aucun arbre cartographié dans OSM sur cette commune "
+                "— couche non créée."
+            )
+            return None
+
+        clipped = processing.run(
+            "native:clip",
+            {"INPUT": mem_layer, "OVERLAY": boundary_layer, "OUTPUT": "memory:"},
+            feedback=feedback,
+        )["OUTPUT"]
+        clipped.setName("Arbres (OSM)")
+        if clipped.featureCount() == 0:
+            # Cas propre à l'emprise groupée : la commune est couverte par la
+            # requête du lot mais ne contient elle-même aucun arbre.
+            feedback.pushInfo(
+                "   ℹ  Aucun arbre cartographié dans OSM sur cette commune "
+                "— couche non créée."
+            )
+            return None
+        feedback.pushInfo(f"   ✂  {clipped.featureCount()} arbre(s) dans la commune")
+        return clipped
+
+    # =========================================================================
     # Helpers – symbologie
     # =========================================================================
 
@@ -2598,6 +3031,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
             return
         if style_key == "bdforet":
             self._apply_bdforet_style(layer)
+            return
+        if style_key == "osm_arbres":
+            self._apply_osm_arbres_style(layer)
             return
 
         # Chaque entrée est un callable qui renvoie un QgsSymbol configuré.
@@ -3290,6 +3726,44 @@ class FDPParCommune(QgsProcessingAlgorithm):
             symbol_props={"outline_style": "no"},
         )
 
+    def _apply_osm_arbres_style(self, layer: QgsVectorLayer):
+        """
+        Arbres isolés OSM — même langage graphique que la Végétation haute
+        (_apply_bdforet_style) : catégorisation feuillus / conifères dans la
+        MÊME palette de verts. Le tag OSM « leaf_type » est l'équivalent
+        ponctuel du poste tfv_g11 de la BD Forêt (broadleaved = feuillus,
+        needleleaved = conifères).
+
+        Deux adaptations propres au ponctuel :
+          • un contour vert foncé fin, là où les remplissages n'ont aucun
+            contour : un point #8CCD8C posé sur un polygone « Forêt fermée de
+            feuillus » de la même couleur serait invisible sans lui ;
+          • le repli ELSE prend le vert MOYEN et non le vert pâle des surfaces.
+            « leaf_type » est absent sur environ deux arbres sur trois en ville
+            et sur la quasi-totalité des arbres ruraux : c'est le cas le plus
+            fréquent, pas un résidu — il doit rester parfaitement lisible.
+
+        Le poste « mixte » de la BD Forêt n'a volontairement pas d'équivalent
+        ici : leaf_type=mixed ne veut rien dire sur un arbre unique, une règle
+        de ce nom n'apparaîtrait dans la légende que pour ne jamais rien
+        sélectionner.
+        """
+        rules = [
+            ("Feuillu", "#8CCD8C", "\"leaf_type\" = 'broadleaved'"),
+            ("Conifère", "#5FA878", "\"leaf_type\" = 'needleleaved'"),
+        ]
+        _apply_marker_rules(
+            layer, rules,
+            fallback_color="#74BC82",
+            fallback_label="Essence non précisée",
+            symbol_props={
+                "name": "circle",
+                "size": "2.0",
+                "outline_color": "#4A8A5E",
+                "outline_width": "0.2",
+            },
+        )
+
     # =========================================================================
     # Helpers – symbologie RPG
     # =========================================================================
@@ -3961,11 +4435,26 @@ class _LayerSelectorDialog(QDialog):
         new_content = QWidget()
         lay = QVBoxLayout(new_content)
 
-        _RULE_BASED_KEYS = {"sirene", "roads", "railways"}
+        # Couches dont _DEFAULT_STYLES vaut None : leur symbologie est calculée
+        # par règles (_apply_*_style) et n'est donc pas éditable ici. Le jeu est
+        # DÉRIVÉ du catalogue plutôt que listé à la main, pour deux raisons :
+        #   • une nouvelle couche règle-par-règle n'a rien à déclarer en double ;
+        #   • surtout, sans cela l'éditeur crée un style vide pour ces couches
+        #     (self._styles[sk] = {} plus bas), et {} n'étant pas None, l'import
+        #     appliquait ensuite _apply_custom_style — un aplat gris uni qui
+        #     écrasait le rendu par règles, au seul motif que l'utilisateur avait
+        #     cliqué la couche dans la liste d'ordre pour voir son style.
+        _RULE_BASED_KEYS = {k for k, v in _DEFAULT_STYLES.items() if v is None}
         _RULE_BASED_LABELS = {
             "sirene": "Symbologie par catégorie NAF — automatique.",
             "roads": "Symbologie hiérarchique par nature et importance — automatique.",
             "railways": "Symbologie par type de voie — automatique.",
+            "osm_arbres": (
+                "Symbologie par type de feuillage (tag OSM « leaf_type ») —\n"
+                "automatique, dans la palette de la Végétation haute.\n\n"
+                "Couverture OSM très inégale : dense en ville,\n"
+                "souvent vide en commune rurale."
+            ),
         }
         if sk in _RULE_BASED_KEYS:
             lay.addWidget(

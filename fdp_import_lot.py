@@ -13,7 +13,12 @@ chaque commune est importée automatiquement avec les mêmes réglages.
 import importlib.util
 import os
 
-from qgis.core import QgsProcessingParameterString
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsProcessingParameterString,
+    QgsProject,
+)
 from qgis.PyQt.QtWidgets import QDialog
 
 # ── Charger FDPParCommune et _LayerSelectorDialog depuis fdp_par_commune.py ──
@@ -97,6 +102,23 @@ class FDPImportEnLot(FDPParCommune):
         # Évite de rebalayer le parquet national par commune (voir docs/PERF.md).
         if resolved and any(e["style_key"] == "sirene" for e in selected_entries):
             self._prefetch_sirene([c["code"] for c in resolved], feedback)
+
+        # ── 2-bis. Pré-chargement des arbres OSM pour tout le lot ─────────────
+        # Une seule requête Overpass sur l'emprise groupée au lieu d'une par
+        # commune : même motivation que le pré-chargement SIRENE ci-dessus.
+        if resolved and any(e["style_key"] == "osm_arbres" for e in selected_entries):
+            xform = QgsCoordinateTransform(
+                QgsCoordinateReferenceSystem("EPSG:4326"),
+                QgsCoordinateReferenceSystem("EPSG:2154"),
+                QgsProject.instance(),
+            )
+            bboxes = []
+            for commune in resolved:
+                try:
+                    bboxes.append(self._commune_bbox(commune, xform))
+                except Exception:
+                    pass  # géométrie illisible : cette commune sera traitée seule
+            self._prefetch_osm_trees(bboxes, feedback)
 
         # ── 3. Import de chaque commune ───────────────────────────────────────
         total_ok = len(resolved)
