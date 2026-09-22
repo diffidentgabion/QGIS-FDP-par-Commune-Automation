@@ -22,6 +22,7 @@ from qgis.core import (
     QgsCoordinateTransform,
     QgsLayerTreeGroup,
     QgsLayerTreeLayer,
+    QgsProcessingParameterString,
     QgsProject,
     QgsVectorLayer,
 )
@@ -65,13 +66,47 @@ class FDPAjoutCouches(FDPParCommune):
     def displayName(self):
         return "FDP — Ajout aux communes existantes"
 
+    FILTRE_COMMUNES = "FILTRE_COMMUNES"
+
+    def shortHelpString(self):
+        return (
+            "Ajoute des couches aux communes déjà importées dans le projet.\n\n"
+            "Chaque groupe commune reçoit les couches sélectionnées qui n'y "
+            "sont pas encore ; celles déjà présentes sont ignorées.\n\n"
+            "Laissez le champ vide pour traiter toutes les communes, ou "
+            "indiquez-en quelques-unes (une par ligne — nom ou code INSEE)."
+        )
+
     def createInstance(self):
         return FDPAjoutCouches()
 
     def initAlgorithm(self, config=None):
-        pass  # aucun paramètre — les communes sont lues depuis le projet
+        # Ce paramètre est aussi ce qui fait ouvrir à QGIS la fenêtre
+        # Processing standard : sans paramètre visible, QGIS lance l'outil
+        # directement avec un MessageBarProgress, dont close() — appelé par
+        # chaque processing.run imbriqué — affiche un dialogue modal
+        # « Problem executing algorithm » à chaque géométrie invalide ignorée.
+        self.addParameter(
+            QgsProcessingParameterString(
+                self.FILTRE_COMMUNES,
+                "Limiter aux communes (une par ligne — nom ou code INSEE ; vide = toutes)",
+                multiLine=True,
+                optional=True,
+            )
+        )
 
     # =========================================================================
+
+    @staticmethod
+    def _divisions_group(group):
+        """
+        Sous-groupe « Divisions communales » du groupe commune, créé au besoin.
+        Même nom qu'à l'import initial (voir _DIVISIONS_KEYS dans
+        fdp_par_commune) pour qu'un ajout vienne compléter le groupe existant
+        au lieu d'en créer un second.
+        """
+        existing = group.findGroup("Divisions communales")
+        return existing if existing is not None else group.addGroup("Divisions communales")
 
     def processAlgorithm(self, parameters, context, feedback):
         root = QgsProject.instance().layerTreeRoot()
@@ -99,6 +134,9 @@ class FDPAjoutCouches(FDPParCommune):
         # (source Overpass) — elle est donc absente de wfs_entries et doit être
         # traitée par son propre bloc plus bas.
         arbres_entry = next((e for e in selected_entries if e["style_key"] == "osm_arbres"), None)
+        # Quartiers prioritaires : source GPKG data.gouv, donc également
+        # absente de wfs_entries et traitée par son propre bloc.
+        qpv_entry    = next((e for e in selected_entries if e["style_key"] == "qpv"), None)
         wfs_entries  = [e for e in selected_entries if e["typename"] is not None]
 
         crs_4326 = QgsCoordinateReferenceSystem("EPSG:4326")
@@ -120,6 +158,18 @@ class FDPAjoutCouches(FDPParCommune):
 
         if not commune_nodes:
             raise Exception("Aucune commune reconnue dans les groupes du projet.")
+
+        filtre = [
+            t.strip().casefold()
+            for t in (self.parameterAsString(parameters, self.FILTRE_COMMUNES, context) or "").splitlines()
+            if t.strip()
+        ]
+        if filtre:
+            commune_nodes, non_trouves = self._filter_communes(commune_nodes, filtre)
+            for t in non_trouves:
+                feedback.pushWarning(f"⚠  « {t} » : aucune commune correspondante dans le projet.")
+            if not commune_nodes:
+                raise Exception("Aucune commune du projet ne correspond au filtre.")
 
         feedback.pushInfo(f"🗺  {len(commune_nodes)} commune(s) identifiée(s).")
 
@@ -180,14 +230,21 @@ class FDPAjoutCouches(FDPParCommune):
                     feedback.pushInfo(f"   ↷  {entry['display_name']} déjà présent.")
                     continue
                 try:
+                    # insee : déclenche l'année de construction du bâti (BDNB)
+                    # dans le chargeur partagé — voir _post_load_extras.
                     layer = self._load_wfs_layer(
                         entry["typename"], entry["display_name"],
-                        bbox, boundary_layer, crs_2154, feedback,
+                        bbox, boundary_layer, crs_2154, feedback, insee,
                     )
                     if layer:
                         self._apply_style(layer, entry["style_key"])
                         QgsProject.instance().addMapLayer(layer, False)
-                        group.addLayer(layer)
+                        # Les divisions infra-communales vont dans leur propre
+                        # sous-groupe, comme à l'import initial.
+                        if entry["style_key"] == "iris":
+                            self._divisions_group(group).addLayer(layer)
+                        else:
+                            group.addLayer(layer)
                         existing_names.add(layer.name())
                         any_added = True
                 except Exception as e:
@@ -212,6 +269,24 @@ class FDPAjoutCouches(FDPParCommune):
                             any_added = True
                     except Exception as e:
                         feedback.reportError(f"   ⚠  Arbres (OSM) : {e}", fatalError=False)
+
+            # ── Quartiers prioritaires (QPV) ──────────────────────────────────
+            if qpv_entry and not feedback.isCanceled():
+                if qpv_entry["display_name"] in existing_names:
+                    feedback.pushInfo("   ↷  Quartiers prioritaires déjà présents.")
+                else:
+                    try:
+                        qpv_layer = self._load_qpv_layer(insee, crs_2154, feedback)
+                        if qpv_layer:
+                            self._apply_style(qpv_layer, "qpv")
+                            QgsProject.instance().addMapLayer(qpv_layer, False)
+                            group.addLayer(qpv_layer)
+                            existing_names.add(qpv_layer.name())
+                            any_added = True
+                    except Exception as e:
+                        feedback.reportError(
+                            f"   ⚠  Quartiers prioritaires : {e}", fatalError=False
+                        )
 
             # ── SIRENE ────────────────────────────────────────────────────────
             if sirene_entry and not feedback.isCanceled():
@@ -360,5 +435,25 @@ class FDPAjoutCouches(FDPParCommune):
                     if isinstance(grandchild, QgsLayerTreeGroup):
                         candidates.append(grandchild)
         return candidates
+
+    @staticmethod
+    def _filter_communes(commune_nodes, filtre):
+        """
+        Garde les (groupe, commune) dont le nom de groupe, le nom officiel ou
+        le code INSEE figure dans `filtre` (valeurs déjà en casefold).
+        Renvoie (communes retenues, valeurs du filtre sans correspondance).
+        """
+        kept, matched = [], set()
+        for group, commune in commune_nodes:
+            keys = {
+                group.name().strip().casefold(),
+                str(commune.get("nom", "")).casefold(),
+                str(commune.get("code", "")).casefold(),
+            }
+            hits = keys.intersection(filtre)
+            if hits:
+                kept.append((group, commune))
+                matched |= hits
+        return kept, [t for t in filtre if t not in matched]
 
     # _lookup_commune_batch is inherited from FDPParCommune

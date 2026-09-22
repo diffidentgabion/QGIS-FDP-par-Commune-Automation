@@ -30,6 +30,7 @@ from qgis.core import (
     QgsLineSymbol,
     QgsMarkerSymbol,
     QgsNetworkAccessManager,
+    QgsPalLayerSettings,
     QgsPointXY,
     QgsProcessingAlgorithm,
     QgsProcessingContext,
@@ -42,8 +43,11 @@ from qgis.core import (
     QgsSimpleLineSymbolLayer,
     QgsSingleSymbolRenderer,
     QgsSymbolLayer,
+    QgsTextBufferSettings,
+    QgsTextFormat,
     QgsUnitTypes,
     QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
     QgsWkbTypes,
 )
 from qgis.gui import QgsColorButton
@@ -105,6 +109,10 @@ build_bati_layers = _mod.build_bati_layers
 
 _mod = _load_sibling("sirene_display")
 build_displaced_sirene_layer = _mod.build_displaced_sirene_layer
+
+# Année de construction du bâti (BDNB) — voir docs/AGE DU BATI.md
+_mod = _load_sibling("bdnb_age")
+bdnb_annees_construction = _mod.annees_construction
 
 ensure_theme_manager = _load_sibling("theme_manager").ensure_theme_manager
 del _mod
@@ -186,6 +194,13 @@ _LEGACY_DISPLAY_NAMES = {
     "Végétation basse": frozenset({"Végétation"}),
 }
 
+# Couches dont une colonne est étiquetée à l'écran : sur un découpage
+# infra-communal, le nom du quartier EST l'information — la lire dans la table
+# attributaire au lieu de la carte n'aurait pas de sens. typename → champ.
+_LABEL_FIELDS = {
+    "STATISTICALUNITS.IRIS:contours_iris": "nom_iris",
+}
+
 _LAYER_CATALOGUE = [
     # ── Zonages de protection (INPN/PatriNat via Géoplateforme) ───────────────
     # Overlays quasi transparents à contour tireté, activés d'un bloc par le
@@ -243,6 +258,33 @@ _LAYER_CATALOGUE = [
     },
     # ── Couches par défaut ────────────────────────────────────────────────────
     # Ordre = haut → bas dans la légende (haut = rendu par-dessus)
+    # Quartiers prioritaires : zonage réglementaire, de la même famille que les
+    # zonages de protection ci-dessus — d'où sa place juste EN DESSOUS d'eux,
+    # au-dessus du fond de plan. Décochée par défaut : seules ~1 300 communes
+    # en comptent, la couche serait vide partout ailleurs.
+    {
+        "section": "default",
+        "typename": None,  # GPKG data.gouv, pas WFS — voir _load_qpv_layer
+        "display_name": "Quartiers prioritaires (QPV)",
+        "style_key": "qpv",
+        "geom_type": "polygon",
+        "checked": False,
+    },
+    # Découpage infra-communal de l'INSEE, regroupé dans « Divisions
+    # communales » à l'assemblage (voir _DIVISIONS_KEYS) : le sous-groupe est
+    # prévu pour accueillir les autres divisions du même ordre (grands
+    # quartiers, arrondissements municipaux, communes déléguées).
+    # Décochée par défaut : en dessous de ~5 000 habitants, l'INSEE ne découpe
+    # pas la commune — la couche ne renvoie qu'un IRIS de type « Z » qui
+    # redouble la limite communale déjà chargée.
+    {
+        "section": "default",
+        "typename": "STATISTICALUNITS.IRIS:contours_iris",
+        "display_name": "IRIS (quartiers INSEE)",
+        "style_key": "iris",
+        "geom_type": "polygon",
+        "checked": False,
+    },
     {
         "section": "default",
         "typename": None,
@@ -259,18 +301,20 @@ _LAYER_CATALOGUE = [
         "geom_type": "polygon",
         "checked": True,
     },
-    # Arbres isolés OpenStreetMap (natural=tree) — au-dessus de la Végétation
-    # haute pour que les points restent visibles par-dessus les massifs.
-    # Décochée par défaut : source contributive, donc couverture très inégale
-    # (des dizaines de milliers d'arbres en ville, souvent zéro en rural), et
-    # chaque import ajoute un aller-retour vers Overpass.
+    # Arbres isolés OpenStreetMap (natural=tree) — placés juste au-dessus de la
+    # Végétation haute pour que les points restent visibles par-dessus les
+    # massifs (ordre du catalogue = haut → bas dans la légende).
+    # Cochée par défaut : source contributive, donc couverture inégale (des
+    # dizaines de milliers d'arbres en ville, souvent zéro en rural) et un
+    # aller-retour Overpass par import, mais l'absence de données se traduit
+    # par une couche vide, pas par une erreur — le coût est acceptable.
     {
         "section": "default",
         "typename": None,  # source Overpass, pas WFS — voir _load_osm_trees
         "display_name": "Arbres (OSM)",
         "style_key": "osm_arbres",
         "geom_type": "point",
-        "checked": False,
+        "checked": True,
     },
     # Végétation haute (BD Forêt V2) et Végétation basse (BDTOPO) se
     # complètent : la végétation BDTOPO est délestée des natures forestières
@@ -546,6 +590,24 @@ _LAYER_CATALOGUE = [
 # Clé "sirene" → None (rendu règle-par-règle, non éditable ici).
 _DEFAULT_STYLES = {
     # ── Couches par défaut ────────────────────────────────────────────────────
+    # Quartiers prioritaires : même écriture que les zonages de protection
+    # (remplissage quasi transparent + contour tireté), teinte distincte.
+    "qpv": {
+        "geom_type": "polygon",
+        "fill_color": QColor(176, 74, 122, 45),
+        "outline_color": QColor("#B04A7A"),
+        "outline_width": 0.5,
+        "outline_style": "dashed",
+    },
+    # IRIS : découpage de lecture, jamais un aplat — sans remplissage, pour
+    # rester lisible par-dessus le bâti et les parcelles.
+    "iris": {
+        "geom_type": "polygon",
+        "fill_color": QColor(0, 0, 0, 0),
+        "outline_color": QColor("#7A88A0"),
+        "outline_width": 0.3,
+        "outline_style": "dashed",
+    },
     "sirene": None,
     "buildings": {
         "geom_type": "polygon",
@@ -1293,10 +1355,12 @@ class FDPParCommune(QgsProcessingAlgorithm):
             if feedback.isCanceled():
                 return
             feedback.pushInfo(f"   {entry['display_name']}…")
-            if entry["style_key"] == "parcels":
-                # Parcelles : filtre code_insee + matérialisation sans découpage
-                # (elles épousent déjà la limite communale) — bien plus rapide.
-                layer = self._load_parcelle_layer(
+            if entry["style_key"] in ("parcels", "iris"):
+                # Parcelles et IRIS : filtre code_insee + matérialisation sans
+                # découpage (ils épousent déjà la limite communale) — bien plus
+                # rapide. Repli automatique sur bbox + découpage si le filtre
+                # ne donne rien (Paris/Lyon/Marseille, taguées par arrondissement).
+                layer = self._load_code_insee_layer(
                     entry["typename"], entry["display_name"], insee,
                     bbox, boundary_layer, crs_2154, feedback,
                 )
@@ -1308,6 +1372,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                     boundary_layer,
                     crs_2154,
                     feedback,
+                    insee,
                 )
             if layer:
                 loaded_layers[entry["style_key"]] = layer
@@ -1424,6 +1489,18 @@ class FDPParCommune(QgsProcessingAlgorithm):
             if arbres_layer:
                 loaded_layers["osm_arbres"] = arbres_layer
 
+        # ── 4e-ter. Quartiers prioritaires (QPV) ──────────────────────────────
+        # Comme SIRENE et les arbres : pas de typename WFS, donc chargée ici et
+        # non dans la boucle wfs_entries.
+        qpv_entry = next(
+            (e for e in selected_entries if e["style_key"] == "qpv"), None
+        )
+        if qpv_entry and not feedback.isCanceled():
+            feedback.pushInfo("🏙  Quartiers prioritaires…")
+            qpv_layer = self._load_qpv_layer(insee, crs_2154, feedback)
+            if qpv_layer:
+                loaded_layers["qpv"] = qpv_layer
+
         # ── 4f. Classification intrinsèque du bâti ───────────────────────────
         bati_stats = []
         bati_layers = []
@@ -1492,6 +1569,13 @@ class FDPParCommune(QgsProcessingAlgorithm):
         _OUTDOOR_EXTRA_KEYS = {"terrain_de_sport", "cimetiere"}
         _HYDRO_KEYS = {"water_surface", "rivers", "reservoir"}
         _ZONES_KEYS = {"natura_sic", "natura_zps", "znieff1", "znieff2", "apb", "pnr"}
+        # Divisions infra-communales de l'INSEE. Sous-groupe prévu pour
+        # accueillir les autres découpages du même ordre (grands quartiers,
+        # arrondissements municipaux, communes déléguées) sans réorganiser la
+        # légende. Les QPV en sont tenus à l'écart : c'est un zonage de
+        # politique publique, pas une division administrative — il reste donc
+        # avec les zonages, juste sous « Zonages de protection ».
+        _DIVISIONS_KEYS = {"iris"}
         rpg_grp = None  # créé à la demande au premier passage d'une couche RPG
         parcels_layer_deferred = (
             None  # ajouté à rpg_grp EN DERNIER (sous toutes les couches agri)
@@ -1506,6 +1590,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
         # Zonages de protection : en tête de la liste d'ordre → le sous-groupe
         # est créé en premier et apparaît donc en haut de la légende.
         zones_grp = None  # créé à la demande pour les zonages de protection
+        divisions_grp = None  # créé à la demande pour les divisions communales
 
         for entry in selected_entries:
             sk = entry["style_key"]
@@ -1622,6 +1707,10 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 if zones_grp is None:
                     zones_grp = group.addGroup("Zonages de protection")
                 zones_grp.addLayer(layer)
+            elif sk in _DIVISIONS_KEYS:
+                if divisions_grp is None:
+                    divisions_grp = group.addGroup("Divisions communales")
+                divisions_grp.addLayer(layer)
             elif sk in _HYDRO_KEYS:
                 # Hydrographie (surface, cours d'eau, réservoir) → groupe dédié.
                 if hydro_grp is None:
@@ -2000,6 +2089,50 @@ class FDPParCommune(QgsProcessingAlgorithm):
             QCoreApplication.processEvents()
             time.sleep(0.05)
 
+    _HTTP_TIMEOUT_MS = 120_000
+
+    def _http_get(self, url, feedback, headers=None, timeout_ms=None):
+        """
+        GET binaire générique → (statut HTTP, octets, panne).
+        `panne` est None si la réponse est exploitable, sinon un libellé court.
+        `headers` est un dict {nom: valeur} (utilisé pour les requêtes Range).
+
+        Même motivation que _overpass_request : requests.get bloquerait le
+        thread graphique — et les algorithmes FlagNoThreading tournent dans ce
+        thread — donc QGIS déclaré « ne répond pas », sans même pouvoir
+        annuler. QgsBlockingNetworkRequest attend dans une boucle d'événements
+        Qt imbriquée et le `feedback` transmis interrompt le transfert.
+
+        Seul point d'entrée réseau des sources BDNB et QPV : les tests le
+        remplacent pour rejouer les pannes sans serveur.
+        """
+        timeout_ms = timeout_ms or self._HTTP_TIMEOUT_MS
+        request = QNetworkRequest(QUrl(url))
+        # Comme pour Overpass : sans cela une réponse mise en cache par QGIS
+        # serait resservie indéfiniment (voir _purge_network_cache).
+        request.setAttribute(
+            QNetworkRequest.CacheLoadControlAttribute, QNetworkRequest.AlwaysNetwork
+        )
+        request.setTransferTimeout(timeout_ms)
+        for name, value in (headers or {}).items():
+            request.setRawHeader(name.encode("ascii"), str(value).encode("ascii"))
+
+        blocking = QgsBlockingNetworkRequest()
+        blocking.get(request, False, feedback)
+        reply = blocking.reply()
+        status = reply.attribute(QNetworkRequest.HttpStatusCodeAttribute)
+        content = bytes(reply.content())
+
+        # Même piège que dans _overpass_request : un transfert coupé par
+        # setTransferTimeout renvoie NoError, un statut None et un corps vide.
+        if status is None:
+            return None, None, f"délai dépassé (> {timeout_ms // 1000} s)"
+        if status not in (200, 206):
+            return status, None, f"HTTP {status}"
+        if not content:
+            return status, None, "réponse vide"
+        return status, content, None
+
     def _wfs_open(self, uri, display_name, rect, feedback):
         """
         Crée la couche WFS `uri` et télécharge `rect` de façon vérifiée, en
@@ -2048,11 +2181,15 @@ class FDPParCommune(QgsProcessingAlgorithm):
         boundary_layer: QgsVectorLayer,
         crs_2154: QgsCoordinateReferenceSystem,
         feedback,
+        insee: str = None,
     ):
         """
         Construit l'URI WFS GetFeature avec filtre BBOX, charge la couche
         (téléchargement complet vérifié, voir _wfs_open), puis la découpe sur
         le contour communal.
+
+        `insee` (facultatif) déclenche les enrichissements qui ont besoin du
+        code commune — aujourd'hui l'année de construction du bâti.
         Renvoie None (avec avertissement) si la couche est invalide ; lève une
         exception si Géoplateforme ne livre pas la couche complète.
         """
@@ -2114,22 +2251,24 @@ class FDPParCommune(QgsProcessingAlgorithm):
                     "retirée(s) (couvertes par la BD Forêt V2)"
                 )
 
+        self._post_load_extras(clipped, typename, insee, feedback)
         return clipped
 
     # Garde-fou : au-delà de ce nombre d'entités, le filtre code_insee n'a
     # manifestement pas été appliqué (récupération nationale) → repli bbox+clip.
     _PARCELLE_MAX = 500000
 
-    def _load_parcelle_layer(self, typename, display_name, insee, bbox,
-                             boundary_layer, crs_2154, feedback):
+    def _load_code_insee_layer(self, typename, display_name, insee, bbox,
+                               boundary_layer, crs_2154, feedback):
         """
-        Charge les parcelles cadastrales via un FILTRE ATTRIBUTAIRE
+        Charge une couche découpée par commune via un FILTRE ATTRIBUTAIRE
         (CQL_FILTER code_insee='INSEE') au lieu d'un filtre BBOX + découpage.
+        Utilisé pour les parcelles cadastrales et les IRIS.
 
-        Les parcelles cadastrales sont rattachées administrativement à une seule
-        commune (elles ne franchissent jamais une limite communale), donc le
-        filtre code_insee renvoie exactement le même ensemble que bbox+clip, tout
-        en évitant (a) la sur-collecte des parcelles voisines et surtout (b) le
+        Ces deux couches sont rattachées administrativement à une seule commune
+        (elles ne franchissent jamais une limite communale), donc le filtre
+        code_insee renvoie exactement le même ensemble que bbox+clip, tout
+        en évitant (a) la sur-collecte des entités voisines et surtout (b) le
         native:clip de dizaines de milliers de polygones — l'étape la plus lente.
 
         Résultat matérialisé en couche mémoire (pas de couche WFS vive dans le
@@ -2147,9 +2286,12 @@ class FDPParCommune(QgsProcessingAlgorithm):
         )
 
         def _fallback(reason):
-            feedback.pushInfo(f"   ↩  Parcelles : {reason} — repli bbox + découpage.")
+            feedback.pushInfo(
+                f"   ↩  {display_name} : {reason} — repli bbox + découpage."
+            )
             return self._load_wfs_layer(
-                typename, display_name, bbox, boundary_layer, crs_2154, feedback
+                typename, display_name, bbox, boundary_layer, crs_2154, feedback,
+                insee,
             )
 
         # Même parade que _wfs_open contre les réponses corrompues de
@@ -2204,14 +2346,274 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 pr.addFeatures(list(layer.getFeatures()))
                 mem.updateExtents()
                 feedback.pushInfo(
-                    f"   ✓  {mem.featureCount()} parcelles (filtre code_insee)"
+                    f"   ✓  {mem.featureCount()} entité(s) (filtre code_insee)"
                 )
+                self._post_load_extras(mem, typename, insee, feedback)
                 return mem
         except Exception as e:
             return _fallback(f"voie rapide en erreur ({e})")
         if feedback.isCanceled():
             return None
         return _fallback(f"Géoplateforme en échec après {n_attempts} tentatives ({problem})")
+
+    # =========================================================================
+    # Helpers – enrichissements et divisions infra-communales
+    # =========================================================================
+
+    def _post_load_extras(self, layer, typename, insee, feedback):
+        """
+        Traitements appliqués à une couche fraîchement chargée, quel que soit
+        le chemin suivi (bbox + découpage ou filtre code_insee). Placés dans le
+        chargeur partagé pour que « Ajout aux communes existantes » en
+        bénéficie aussi — même raison que le filtrage de la végétation basse.
+        Sans effet sur les couches non concernées.
+        """
+        if layer is None or not layer.isValid():
+            return
+        field = _LABEL_FIELDS.get(typename)
+        if field is not None and layer.fields().indexOf(field) != -1:
+            self._apply_field_labels(layer, field)
+        if typename == "BDTOPO_V3:batiment":
+            self._enrich_bati_annee(layer, insee, feedback)
+
+    def _apply_field_labels(self, layer, field, size=7.0, color="#4A5568"):
+        """
+        Étiquette `field` sur les entités, avec un halo blanc pour rester
+        lisible sur le bâti. Seules les couches de découpage infra-communal
+        sont étiquetées : ailleurs, l'étiquetage encombrerait un fond de plan
+        d'architecte.
+        """
+        settings = QgsPalLayerSettings()
+        settings.fieldName = field
+        text = QgsTextFormat()
+        text.setSize(size)
+        text.setColor(QColor(color))
+        halo = QgsTextBufferSettings()
+        halo.setEnabled(True)
+        halo.setSize(0.8)
+        halo.setColor(QColor("#ffffff"))
+        text.setBuffer(halo)
+        settings.setFormat(text)
+        layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+        layer.setLabelsEnabled(True)
+
+    @staticmethod
+    def _annee_from_date(value):
+        """
+        Année (int) d'une date BD TOPO, quelle que soit sa forme : le
+        fournisseur WFS livre tantôt un QDate, tantôt le texte brut
+        (« 1984-01-01Z »), et NULL pour la majorité du bâti rural.
+        Renvoie None si la valeur n'est pas une année vraisemblable.
+        """
+        if value is None:
+            return None
+        try:
+            annee = int(value.year())  # QDate
+        except AttributeError:
+            texte = str(value).strip()
+            if len(texte) < 4 or not texte[:4].isdigit():
+                return None  # NULL, chaîne vide, valeur inattendue
+            annee = int(texte[:4])
+        return annee if 1000 <= annee <= 2100 else None
+
+    def _enrich_bati_annee(self, layer, insee, feedback):
+        """
+        Ajoute « annee_construction » et « source_annee » à la couche Bâti, pour
+        qu'un clic sur un bâtiment affiche son année de construction.
+
+        Deux sources complémentaires, dans cet ordre :
+          1. BDNB (fichiers fonciers, jointure exacte sur cleabs) — la plus
+             complète ;
+          2. date_d_apparition de la BD TOPO — même origine foncière, mais
+             renseignée sur nettement moins de bâtiments.
+        L'union des deux couvre plus de bâtiments que chacune séparément, d'où
+        le repli systématique plutôt qu'un choix de source unique.
+
+        Une panne BDNB n'interrompt jamais l'import : la couche est dégradée à
+        la seule date_d_apparition. Comme pour Overpass, un disjoncteur évite
+        de repayer le coût de l'échec pour chaque commune d'un lot.
+        """
+        if layer.featureCount() == 0:
+            return
+        fields = layer.fields()
+        i_cleabs = fields.indexOf("cleabs")
+        i_apparition = fields.indexOf("date_d_apparition")
+
+        annees = {}
+        if i_cleabs != -1 and insee:
+            if getattr(self, "_bdnb_down", False):
+                feedback.pushInfo(
+                    "   ↷  BDNB déjà indisponible sur cette exécution — "
+                    "repli sur date_d_apparition."
+                )
+            else:
+                cleabs = {f[i_cleabs] for f in layer.getFeatures()}
+                try:
+                    feedback.pushInfo("   🗓  Années de construction (BDNB)…")
+                    annees = bdnb_annees_construction(
+                        self._get_dep(insee), cleabs, self._http_get, feedback
+                    )
+                except Exception as exc:
+                    self._bdnb_down = True
+                    feedback.pushWarning(
+                        f"   ⚠  BDNB indisponible ({exc}) — "
+                        "repli sur date_d_apparition."
+                    )
+
+        provider = layer.dataProvider()
+        provider.addAttributes(
+            [
+                QgsField("annee_construction", QMetaType.Type.Int),
+                QgsField("source_annee", QMetaType.Type.QString),
+            ]
+        )
+        layer.updateFields()
+        i_annee = layer.fields().indexOf("annee_construction")
+        i_source = layer.fields().indexOf("source_annee")
+
+        changes = {}
+        n_bdnb = 0
+        for feature in layer.getFeatures():
+            annee = annees.get(feature[i_cleabs]) if i_cleabs != -1 else None
+            source = "BDNB" if annee is not None else None
+            if annee is None and i_apparition != -1:
+                annee = self._annee_from_date(feature[i_apparition])
+                source = "BD TOPO" if annee is not None else None
+            if annee is None:
+                continue
+            if source == "BDNB":
+                n_bdnb += 1
+            changes[feature.id()] = {i_annee: annee, i_source: source}
+        if changes:
+            provider.changeAttributeValues(changes)
+
+        feedback.pushInfo(
+            f"   ✓  Année de construction : {len(changes)}/{layer.featureCount()} "
+            f"bâtiment(s) ({n_bdnb} BDNB, {len(changes) - n_bdnb} BD TOPO)"
+        )
+
+        # Alias : dans la fenêtre d'identification, « date_d_apparition » ne dit
+        # rien à personne — et malgré son nom, il ne s'agit pas de la date
+        # d'entrée de l'objet dans la base.
+        layer.setFieldAlias(i_annee, "Année de construction")
+        layer.setFieldAlias(i_source, "Source de l'année")
+        if i_apparition != -1:
+            layer.setFieldAlias(i_apparition, "Année d'apparition (BD TOPO)")
+        layer.setMapTipTemplate(
+            "<b>Bâtiment</b><br/>Année de construction : "
+            "[% coalesce(\"annee_construction\", 'inconnue') %]"
+        )
+    # ── Quartiers prioritaires de la politique de la ville (ANCT) ────────────
+    # Jeu de données national de 6 Mo (1 362 quartiers en France hexagonale),
+    # déjà en Lambert 93 : on le télécharge une fois par exécution, puis on y
+    # filtre la commune. Rien à interroger commune par commune.
+    _QPV_DATAGOUV_API = (
+        "https://www.data.gouv.fr/api/1/datasets/"
+        "quartiers-prioritaires-de-la-politique-de-la-ville-qpv/"
+    )
+    # URL figée utilisée si l'API data.gouv est injoignable : les URL des
+    # ressources data.gouv sont horodatées et changent à chaque réédition.
+    _QPV_ZIP_FALLBACK = (
+        "https://static.data.gouv.fr/resources/"
+        "quartiers-prioritaires-de-la-politique-de-la-ville-qpv/"
+        "20260115-205144/qpv-2024-gpkg.zip"
+    )
+    _QPV_GPKG_METROPOLE = "GPKG/QP2024_France_hexagonale_LB93.gpkg"
+    _QPV_GPKG_OUTREMER = "GPKG/QP2024_France_Hexagonale_Outre_Mer_WGS84.gpkg"
+
+    def _resolve_qpv_url(self, feedback):
+        """URL courante de l'archive GPKG des périmètres QPV sur data.gouv."""
+        status, content, panne = self._http_get(self._QPV_DATAGOUV_API, feedback)
+        if panne is None:
+            try:
+                for resource in json.loads(content.decode("utf-8")).get(
+                    "resources", []
+                ):
+                    url = resource.get("url", "")
+                    if url.endswith("-gpkg.zip"):
+                        return url
+            except Exception as exc:
+                panne = f"réponse illisible ({exc})"
+        feedback.pushInfo(f"   ℹ  QPV : ressource non résolue ({panne}) — URL figée.")
+        return self._QPV_ZIP_FALLBACK
+
+    def _qpv_zip_path(self, feedback):
+        """Archive QPV, téléchargée une seule fois par exécution."""
+        cached = getattr(self, "_qpv_zip", None)
+        if cached and os.path.exists(cached):
+            return cached
+        if getattr(self, "_qpv_down", False):
+            return None
+        status, content, panne = self._http_get(
+            self._resolve_qpv_url(feedback), feedback
+        )
+        if panne is not None:
+            # Disjoncteur : même motif que pour Overpass et la BDNB — ne pas
+            # repayer le coût de l'échec pour chaque commune du lot.
+            self._qpv_down = True
+            feedback.pushWarning(f"   ⚠  QPV indisponible ({panne}) — couche ignorée.")
+            return None
+        path = os.path.join(tempfile.gettempdir(), "fdp_qpv_gpkg.zip")
+        with open(path, "wb") as handle:
+            handle.write(content)
+        self._qpv_zip = path
+        return path
+
+    def _load_qpv_layer(self, insee, crs_2154, feedback):
+        """
+        Quartiers prioritaires de la commune, ou None s'il n'y en a aucun — la
+        plupart des communes sont dans ce cas, et une couche vide n'y
+        apprendrait rien.
+
+        Pas de découpage sur le contour communal : un quartier prioritaire peut
+        déborder sur la commune voisine, et le tronquer masquerait justement ce
+        que l'on cherche à lire.
+        """
+        zip_path = self._qpv_zip_path(feedback)
+        if zip_path is None:
+            return None
+        # Hexagone en Lambert 93, outre-mer en WGS84 : l'archive sépare les
+        # fichiers, chacun dans la projection de son territoire.
+        member = (
+            self._QPV_GPKG_OUTREMER
+            if insee.startswith("97") or insee.startswith("98")
+            else self._QPV_GPKG_METROPOLE
+        )
+        source = QgsVectorLayer(f"/vsizip/{zip_path}/{member}", "qpv_src", "ogr")
+        if not source.isValid():
+            feedback.pushWarning("   ⚠  QPV — archive illisible, couche ignorée.")
+            return None
+        source.setSubsetString(f"insee_com = '{insee}'")
+        features = list(source.getFeatures())
+        if not features:
+            feedback.pushInfo("   ℹ  Aucun quartier prioritaire sur cette commune.")
+            return None
+
+        mem = QgsVectorLayer(
+            f"{QgsWkbTypes.displayString(source.wkbType())}?crs=EPSG:2154",
+            "Quartiers prioritaires (QPV)",
+            "memory",
+        )
+        provider = mem.dataProvider()
+        provider.addAttributes(source.fields().toList())
+        mem.updateFields()
+        xform = None
+        if source.crs() != crs_2154:
+            xform = QgsCoordinateTransform(source.crs(), crs_2154, QgsProject.instance())
+        copied = []
+        for feature in features:
+            geom = QgsGeometry(feature.geometry())
+            if xform is not None:
+                geom.transform(xform)
+            new_feature = QgsFeature(mem.fields())
+            new_feature.setGeometry(geom)
+            new_feature.setAttributes(feature.attributes())
+            copied.append(new_feature)
+        provider.addFeatures(copied)
+        mem.updateExtents()
+        self._apply_field_labels(mem, "lib_qp")
+        feedback.pushInfo(f"   ✓  {mem.featureCount()} quartier(s) prioritaire(s)")
+        return mem
 
     # =========================================================================
     # Helper – SIRENE
@@ -3059,6 +3461,24 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 {
                     "color": "#999999",
                     "outline_style": "no",
+                }
+            ),
+            # Quartiers prioritaires : remplissage quasi transparent, contour tireté
+            "qpv": lambda: QgsFillSymbol.createSimple(
+                {
+                    "color": "176,74,122,45",
+                    "outline_color": "#B04A7A",
+                    "outline_width": "0.5",
+                    "outline_style": "dash",
+                }
+            ),
+            # IRIS : contour tireté seul, sans remplissage
+            "iris": lambda: QgsFillSymbol.createSimple(
+                {
+                    "color": "0,0,0,0",
+                    "outline_color": "#7A88A0",
+                    "outline_width": "0.3",
+                    "outline_style": "dash",
                 }
             ),
         }

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Test de bout en bout, hors interface, du chargeur WFS de fdp_par_commune
-(_load_wfs_layer / _load_parcelle_layer) : serveur Géoplateforme réel, puis
+(_load_wfs_layer / _load_code_insee_layer) : serveur Géoplateforme réel, puis
 pannes injectées par tests/wfs_fault_proxy.py.
 
 Lancer avec le Python de QGIS (OSGeo4W) :
@@ -123,7 +123,7 @@ def bati(fb):
 
 
 def parcelles(fb):
-    return alg._load_parcelle_layer(
+    return alg._load_code_insee_layer(
         "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "Parcelles cadastrales",
         "72181", bbox, boundary, crs_2154, fb,
     )

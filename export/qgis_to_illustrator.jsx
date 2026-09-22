@@ -1,6 +1,14 @@
 /**
- * QGIS → Illustrator Layer Importer  v6.1
+ * QGIS → Illustrator Layer Importer  v6.4
  * qgis_to_illustrator.jsx
+ *
+ * New in v6.4:
+ *   - Commune groups nested inside organisational groups (e.g. CTMs in Lyon:
+ *     root → CTM → communes) are now found and regrouped theme-first too.
+ *     Before, only top-level groups were inspected, so a CTM layout either
+ *     imported as-is or had its communes' names mistaken for themes. The
+ *     organisational level is kept inside each theme master
+ *     (Voirie → CTM → commune).
  *
  * New in v6.3:
  *   - Theme-first regrouping is now applied ONLY to commune groups. It
@@ -272,6 +280,16 @@ function summarize(label, names) {
 // single master layer shared by all communes. Themes are matched across
 // communes by exact name. Output nodes have the same shape as manifest nodes,
 // so buildLayers consumes the result unchanged.
+//
+// Commune groups may sit at any depth: when the user files them into
+// organisational groups in QGIS (e.g. CTMs in Lyon: root → CTM → communes),
+// the organisational level is kept INSIDE each theme master:
+//
+//   Voirie
+//     CTM Nord
+//       Caluire-et-Cuire
+//       Rillieux-la-Pape
+//     CTM Est …
 
 function cloneNodeRenamed(node, newName) {
   var copy = {};
@@ -282,23 +300,43 @@ function cloneNodeRenamed(node, newName) {
   return copy;
 }
 
+function isCommuneGroup(node) {
+  return node.type === "group" && (node.insee || node._fdpCommune)
+    ? true
+    : false;
+}
+
+// True when a (non-commune) group holds a commune group somewhere below it.
+// Never descends into commune groups themselves.
+function containsCommune(node) {
+  var stack = [node];
+  while (stack.length) {
+    var kids = stack.pop().children || [];
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i].type !== "group") continue;
+      if (isCommuneGroup(kids[i])) return true;
+      stack.push(kids[i]);
+    }
+  }
+  return false;
+}
+
 function maybeTransposeThemeFirst(children) {
-  var flags = []; // per root node: treat as a commune group?
   var anyInsee = false;
   var groupNames = [];
 
   for (var i = 0; i < children.length; i++) {
-    var isGroup = children[i].type === "group";
-    var hasInsee = isGroup && children[i].insee;
-    flags.push(hasInsee ? true : false);
-    if (hasInsee) anyInsee = true;
-    if (isGroup) groupNames.push(children[i].name);
+    if (children[i].type !== "group") continue;
+    groupNames.push(children[i].name);
+    if (isCommuneGroup(children[i]) || containsCommune(children[i])) {
+      anyInsee = true;
+    }
   }
 
   if (anyInsee) {
-    // New-style manifest (exporter v6): commune groups are tagged.
-    // Regroup exactly those; everything else stays where it was.
-    return transposeThemeFirst(children, flags);
+    // New-style manifest (exporter v6): commune groups are tagged, at
+    // whatever depth. Regroup exactly those; everything else stays put.
+    return transposeThemeFirst(children);
   }
 
   if (!groupNames.length) return children;
@@ -321,64 +359,91 @@ function maybeTransposeThemeFirst(children) {
   );
   if (!ok) return children;
 
-  for (var f = 0; f < flags.length; f++) {
-    flags[f] = children[f].type === "group";
+  for (var f = 0; f < children.length; f++) {
+    if (children[f].type === "group") children[f]._fdpCommune = true;
   }
-  return transposeThemeFirst(children, flags);
+  return transposeThemeFirst(children);
 }
 
-function transposeThemeFirst(rootChildren, communeFlags) {
-  // Pass 1: build theme masters from the flagged commune groups.
-  // Master insertion order = first commune's theme order (legend order).
-  var masters = [];
+function transposeThemeFirst(rootChildren) {
+  var res = transposeLevel(rootChildren);
+  if (!res.masters.length) return rootChildren;
 
-  function findMaster(name) {
+  // The masters block replaces the commune groups at the position of the
+  // first one; every non-commune node keeps its place.
+  var out = [];
+  for (var i = 0; i < res.anchor; i++) out.push(res.rest[i]);
+  for (var m = 0; m < res.masters.length; m++) out.push(res.masters[m]);
+  for (var j = res.anchor; j < res.rest.length; j++) out.push(res.rest[j]);
+  return out;
+}
+
+// One sibling list → { masters, rest, anchor }:
+//   masters  theme groups built from the commune groups found in this list
+//            (directly, or nested inside organisational groups);
+//   rest     every other node, original order;
+//   anchor   index in `rest` where the masters block belongs.
+// Master order = first contributor's theme order (legend order); themes
+// first seen later are appended.
+function transposeLevel(children) {
+  var masters = [];
+  var rest = [];
+  var anchor = -1;
+
+  function masterFor(name) {
     for (var m = 0; m < masters.length; m++) {
       if (masters[m].name === name) return masters[m];
     }
-    return null;
+    var master = { type: "group", name: name, children: [] };
+    masters.push(master);
+    return master;
   }
 
-  for (var i = 0; i < rootChildren.length; i++) {
-    if (!communeFlags[i]) continue;
-    var communeGroup = rootChildren[i];
+  for (var i = 0; i < children.length; i++) {
+    var node = children[i];
 
-    var themes = communeGroup.children || [];
-    for (var t = 0; t < themes.length; t++) {
-      var theme = themes[t];
-      var master = findMaster(theme.name);
-      if (!master) {
-        master = { type: "group", name: theme.name, children: [] };
-        masters.push(master);
+    if (isCommuneGroup(node)) {
+      if (anchor < 0) anchor = rest.length;
+      var themes = node.children || [];
+      for (var t = 0; t < themes.length; t++) {
+        var theme = themes[t];
+        if (theme.type === "group") {
+          masterFor(theme.name).children.push({
+            type: "group",
+            name: node.name,
+            children: theme.children || [],
+          });
+        } else {
+          // Leaf theme (single PDF): the commune sublayer carries the file.
+          masterFor(theme.name).children.push(
+            cloneNodeRenamed(theme, node.name),
+          );
+        }
       }
-      if (theme.type === "group") {
-        master.children.push({
+    } else if (node.type === "group" && containsCommune(node)) {
+      // Organisational group (CTM, lot…): regroup its communes, then wrap
+      // each resulting theme under a sublayer named after the group.
+      if (anchor < 0) anchor = rest.length;
+      var inner = transposeLevel(node.children || []);
+      for (var k = 0; k < inner.masters.length; k++) {
+        masterFor(inner.masters[k].name).children.push({
           type: "group",
-          name: communeGroup.name,
-          children: theme.children || [],
+          name: node.name,
+          children: inner.masters[k].children,
         });
-      } else {
-        // Leaf theme (single PDF): the commune sublayer carries the file.
-        master.children.push(cloneNodeRenamed(theme, communeGroup.name));
       }
-    }
-  }
-
-  // Pass 2: assemble. The masters block replaces the commune groups at the
-  // position of the first one; every non-commune node keeps its place.
-  var out = [];
-  var inserted = false;
-  for (var j = 0; j < rootChildren.length; j++) {
-    if (communeFlags[j]) {
-      if (!inserted) {
-        for (var k = 0; k < masters.length; k++) out.push(masters[k]);
-        inserted = true;
+      // Anything in the group that isn't commune content stays in a group
+      // of the same name, right after the masters block.
+      if (inner.rest.length) {
+        rest.push({ type: "group", name: node.name, children: inner.rest });
       }
     } else {
-      out.push(rootChildren[j]);
+      rest.push(node);
     }
   }
-  return out;
+
+  if (anchor < 0) anchor = rest.length;
+  return { masters: masters, rest: rest, anchor: anchor };
 }
 
 // ── Layer tree builder ────────────────────────────────────────────────────────

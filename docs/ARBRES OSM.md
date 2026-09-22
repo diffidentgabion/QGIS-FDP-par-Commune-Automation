@@ -45,8 +45,9 @@ l'IGN, avec lesquelles nous découpons, et celles d'OSM.
 
 Case à cocher **indépendante** de la couche « OpenStreetMap » : celle-ci est un
 fond de tuiles raster pré-rendu, les arbres sont une requête vectorielle sur la
-base OSM. On veut couramment l'un sans l'autre. Décochée par défaut : chaque
-import ajouterait sinon un aller-retour Overpass.
+base OSM. On veut couramment l'un sans l'autre. Cochée par défaut : l'import
+paie un aller-retour Overpass, et une commune sans arbres cartographiés donne
+une couche vide plutôt qu'une erreur.
 
 ## 3. Symbologie
 

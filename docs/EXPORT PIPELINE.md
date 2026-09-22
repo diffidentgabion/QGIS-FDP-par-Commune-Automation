@@ -72,6 +72,15 @@ Rules (implemented in `maybeTransposeThemeFirst()` / `transposeThemeFirst()`):
   imports the tree exactly as exported. Never regroup silently: merging
   same-named sibling groups (an Axo per-building stack) destroys their
   painter's-algorithm draw order.
+- **Commune groups may be nested** (v6.4) inside organisational groups the
+  user creates in QGIS (e.g. CTMs in Lyon: root → CTM → communes). The
+  importer finds tagged communes at any depth; the organisational level is
+  kept *inside* each theme master (`Voirie → CTM Nord → Caluire`). Anything
+  else in an organisational group (a loose CTM boundary layer…) stays in a
+  group of the same name right after the masters block. Before v6.4 only
+  top-level groups were inspected: a CTM layout fell through to the
+  untagged-manifest prompt, and "Yes" treated each CTM as a commune, so the
+  "themes" came out as commune names.
 - Themes are matched across communes by **exact name** at the
   commune-group-child level (names are stable there; variable names like
   `Courbes de niveau LiDAR HD (5 m)` live deeper inside stable groups).
