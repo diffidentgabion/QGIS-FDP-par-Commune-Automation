@@ -43,26 +43,31 @@ as a synthetic group named after the layer, one child per named rule.
 Filenames are ASCII-lossy (`Végétation` → `V_g_tation`) — always match nodes
 by `name`, never by `file`.
 
-## Theme-first import (`THEME_FIRST`, v6)
+## Thematic import (`THEME_FIRST`, v6 → v7)
 
 By default (`THEME_FIRST = true`, config at the top of the `.jsx`) the importer
-**transposes** the tree before building: instead of mirroring commune→theme, it
-creates one top-level **master layer per theme** with one sublayer per commune
-inside, each keeping its full original sub-structure:
+**merges** the communes before building: instead of mirroring commune→theme,
+every commune's subtree is folded into one shared theme tree, matching nodes
+by name **at every depth** (v7). No commune appears at any level; a leaf
+layer holds one placed PDF per commune:
 
 ```
-Topographie                ← master
-  Fontainebleau            ← commune sublayer (original sub-structure inside)
-  Barbizon
+Topographie
+  Courbes de niveau LiDAR HD (5 m)   ← one layer, N placed PDFs
 Voirie
-  Fontainebleau
-    Autoroute
-    Route imp. 1 …
-  Barbizon
+  Autoroute
+  Route imp. 1 …
+Commune                              ← all commune limits on one layer
 …
 ```
 
-Rules (implemented in `maybeTransposeThemeFirst()` / `transposeThemeFirst()`):
+Per-commune selection in Illustrator relies on the commune limits layer.
+v6–v6.4 produced `Theme → Commune → content` (and `Theme → CTM → Commune`
+for nested layouts); that kept communes visible at every level and was
+dropped in v7.
+
+Rules (implemented in `maybeTransposeThemeFirst()` / `transposeLevel()` /
+`mergeInto()`):
 
 - **Only commune groups are regrouped** (v6.3). Exporter v6 tags them with
   `"insee"` in the manifest (from the QGIS custom property `fdp_insee`);
@@ -74,26 +79,64 @@ Rules (implemented in `maybeTransposeThemeFirst()` / `transposeThemeFirst()`):
   painter's-algorithm draw order.
 - **Commune groups may be nested** (v6.4) inside organisational groups the
   user creates in QGIS (e.g. CTMs in Lyon: root → CTM → communes). The
-  importer finds tagged communes at any depth; the organisational level is
-  kept *inside* each theme master (`Voirie → CTM Nord → Caluire`). Anything
-  else in an organisational group (a loose CTM boundary layer…) stays in a
-  group of the same name right after the masters block. Before v6.4 only
-  top-level groups were inspected: a CTM layout fell through to the
-  untagged-manifest prompt, and "Yes" treated each CTM as a commune, so the
-  "themes" came out as commune names.
-- Themes are matched across communes by **exact name** at the
-  commune-group-child level (names are stable there; variable names like
-  `Courbes de niveau LiDAR HD (5 m)` live deeper inside stable groups).
-- Master order = first commune's theme order (QGIS legend order); themes first
-  seen in a later commune are appended at the bottom. The masters block sits
+  importer finds tagged communes at any depth and merges them into the same
+  themes; since v7 the organisational level disappears too. Anything else in
+  an organisational group (a loose CTM boundary layer…) stays in a group of
+  the same name right after the themes block. Before v6.4 only top-level
+  groups were inspected: a CTM layout fell through to the untagged-manifest
+  prompt, and "Yes" treated each CTM as a commune, so the "themes" came out
+  as commune names.
+- Nodes match across communes by **type + exact name**, recursively. A name
+  that varies between communes (e.g. `Courbes de niveau LiDAR HD (5 m)` vs a
+  different step) just yields two sibling layers.
+- Same-named siblings *within* one commune are never collapsed: the k-th
+  occurrence matches the k-th occurrence in the merged tree.
+- Order = first commune's legend order; a node first seen in a later commune
+  is inserted right after the node it followed there. The themes block sits
   at the position of the first commune group.
-- Commune order inside each master = manifest root order.
-- A leaf theme (single PDF, e.g. `Commune`) yields a commune sublayer that
-  holds the placed art directly.
-- The same theme may be a group in one commune (rule-based renderer) and a
-  leaf in another (older export) — both merge under one master.
+- A group and a leaf with the same name (rule-based renderer in one commune,
+  plain layer in another) stay two separate sibling layers.
+- Missing/failed PDFs are reported per commune (`Layer (Commune)`) in the
+  final alert; the layer itself is suffixed `[PDF missing]` / `[place failed]`.
 
 Set `THEME_FIRST = false` to disable regrouping entirely.
+
+## Global swatches (`BUILD_SWATCHES`, v7.1)
+
+After each leaf layer is placed (all communes), the importer walks its
+embedded art and turns every distinct fill/stroke colour into a **global
+process swatch**, then links every path using that colour to it. Editing the
+swatch recolours that layer everywhere in the drawing, all communes at once.
+
+```
+Swatches panel
+  Voirie                       ← swatch group = top-level theme
+    Autoroute · trait
+    Autoroute · fond
+    Route imp. 1
+  Bâti par activité SIRENE
+    Commerce
+    …
+```
+
+- Colours come from the **embedded art itself**, not from the QGIS renderer:
+  the PDF already is the QGIS appearance, so nothing is matched or parsed and
+  nothing can drift between the two. No exporter change was needed.
+- One swatch per distinct colour **per layer** (RGB rounded to integers): two
+  layers sharing a colour get separate swatches, so they can diverge. A layer
+  with one colour gets the layer name; with several, `· fond` / `· trait`
+  (+ number) after the role of first use.
+- Names are unique document-wide: on a clash the parent group is prefixed
+  (`Fer / Autoroute`), then a number is appended.
+- Left untouched: clipping paths, pattern/gradient fills, rasters, anything
+  not RGB or gray. QGIS layouts export labels as outlines by default, so
+  labels are recoloured like any other path; live text frames are not.
+- Layers with more than `MAX_SWATCHES_PER_LAYER` (12) colours, e.g. graduated
+  ramps, are left as is and listed in the final alert. Per-layer errors are
+  caught and listed the same way; they never abort the import.
+- Requires embedded placement: skipped when `PLACE_AS_LINKED = true`.
+- Cost: every path is read and relinked once, which adds time on dense
+  building layers. Set `BUILD_SWATCHES = false` if an import is too slow.
 
 ## History / gotchas
 
