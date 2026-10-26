@@ -16,7 +16,25 @@ Attendu (Le Mans, INSEE 72181 — 19 pages de bâti) :
     T5  parcelles réelles                → couche, 0 avertissement (sauf panne réelle)
     T6  parcelles, page 5000 corrompue   → 1 avertissement, même compte que T5
     T7  couche vide sur l'emprise        → couche à 0 entité, pas d'exception
-    T8  typename inexistant              → None + avertissement « couche invalide »
+    T8  typename inexistant              → None + 1 avertissement « couche invalide »
+                                           nommant le typename (~1 s, serveur interrogé)
+
+Serveur muet (connexion ouverte, aucun octet — QGIS abandonne au bout de son
+délai réseau, 60 s par défaut, et journalise « L'opération est annulée ») :
+    T9   GetCapabilities muet une fois   → couche, même compte que T1
+    T10  GetCapabilities muet à jamais   → EXCEPTION après 4 tentatives, jamais None
+    T11  vérif. COUNT=1 muette à jamais  → couche valide, même type et compte que T1
+                                           (QGIS relance 3 fois : 4 min perdues)
+    T12  première page muette une fois   → relance interne de QGIS, même compte
+    T13  DescribeFeatureType muet        → EXCEPTION après 4 tentatives, jamais None
+Filtre code_insee (serveur réel) :
+    T14  parcelles Paris 13e (75113)     → 4 641 via code_insee='75056' AND
+                                           code_arr='113', sans repli, en secondes
+    T15  IRIS Paris entier (75056)       → filtre vide : repli bbox IMMÉDIAT (pas
+                                           4 min de « L'opération est annulée »)
+
+Chaque silence coûte 60 s ou plus (T10, T11, T13 : 4 à 6 min). Ports distincts :
+plusieurs tests peuvent tourner en parallèle, chacun dans son processus.
 """
 import importlib.util
 import json
@@ -35,6 +53,7 @@ from qgis.core import (  # noqa: E402
     QgsCoordinateTransform,
     QgsProcessingFeedback,
     QgsProject,
+    QgsWkbTypes,
 )
 
 QgsApplication.setPrefixPath(PREFIX, True)
@@ -71,15 +90,22 @@ class _Feedback(QgsProcessingFeedback):
 
 
 alg = mod.FDPParCommune()
-feat = json.load(urllib.request.urlopen(
-    "https://geo.api.gouv.fr/communes/72181?fields=contour&format=geojson&geometry=contour"
-))
 crs_2154 = QgsCoordinateReferenceSystem("EPSG:2154")
 xform = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:4326"), crs_2154, QgsProject.instance())
-geom = alg._geojson_to_qgsgeometry(feat["geometry"])
-geom.transform(xform)
-bbox = geom.boundingBox()
-boundary = alg._geom_to_temp_layer(geom, "Polygon", crs_2154)
+
+
+def commune(insee):
+    """(bbox, couche contour) en EPSG:2154 — communes et arrondissements PLM."""
+    feat = json.load(urllib.request.urlopen(
+        f"https://geo.api.gouv.fr/communes/{insee}?type=commune-actuelle,"
+        "arrondissement-municipal&fields=contour&format=geojson&geometry=contour"
+    ))
+    geom = alg._geojson_to_qgsgeometry(feat["geometry"])
+    geom.transform(xform)
+    return geom.boundingBox(), alg._geom_to_temp_layer(geom, "Polygon", crs_2154)
+
+
+bbox, boundary = commune("72181")
 print("Le Mans bbox:", bbox.toString(1), flush=True)
 
 results = {}
@@ -94,6 +120,11 @@ def run(label, fn, faults=None, port=8800):
                                 stdout=plog, stderr=subprocess.STDOUT)
         time.sleep(2)
         mod._WFS_URL = f"http://127.0.0.1:{port}/wfs/ows"
+        if "hang@" in faults:
+            # Le GetCapabilities d'un port déjà utilisé lors d'un précédent
+            # lancement serait servi par le cache réseau de QGIS : le silence
+            # visé ne serait jamais atteint.
+            mod.FDPParCommune._purge_network_cache()
     else:
         mod._WFS_URL = REAL_WFS
     print(f"\n=== {label}", flush=True)
@@ -101,7 +132,9 @@ def run(label, fn, faults=None, port=8800):
     t0 = time.time()
     try:
         out = fn(fb)
-        res = ("layer", out.featureCount() if out is not None else None)
+        res = ("layer", None) if out is None else (
+            "layer", out.featureCount(), QgsWkbTypes.displayString(out.wkbType())
+        )
     except Exception as e:  # noqa: BLE001 — c'est l'issue attendue de T3
         res = ("EXCEPTION", str(e))
     print(f"   -> {res}  avertissements={len(fb.warnings())}  {time.time() - t0:.1f}s", flush=True)
@@ -112,9 +145,13 @@ def run(label, fn, faults=None, port=8800):
         plog.close()
         with open(plog_path) as f:
             lines = f.read().splitlines()
-        n_pages = sum(1 for l in lines if "REQUEST=GetFeature" in l and "RESULTTYPE" not in l)
+        n_pages = sum(1 for l in lines if l.startswith("PASS") and "REQUEST=GetFeature" in l)
         n_inject = sum(1 for l in lines if l.startswith("INJECT"))
-        print(f"   mandataire : {n_pages} pages GetFeature servies + {n_inject} injectée(s)", flush=True)
+        n_hang = sum(1 for l in lines if l.startswith("HANG"))
+        # Pannes réelles de Géoplateforme survenues pendant le test.
+        n_real = sum(1 for l in lines if l.startswith(("UPSTREAM-FAIL", "PASS 5")))
+        print(f"   mandataire : {n_pages} pages GetFeature servies + {n_inject} injectée(s)"
+              f" + {n_hang} silence(s) + {n_real} panne(s) réelle(s)", flush=True)
     mod._WFS_URL = REAL_WFS
 
 
@@ -126,6 +163,22 @@ def parcelles(fb):
     return alg._load_code_insee_layer(
         "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "Parcelles cadastrales",
         "72181", bbox, boundary, crs_2154, fb,
+    )
+
+
+def parcelles_paris13(fb):
+    b, lim = commune("75113")
+    return alg._load_code_insee_layer(
+        "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle", "Parcelles cadastrales",
+        "75113", b, lim, crs_2154, fb,
+    )
+
+
+def iris_paris(fb):
+    b, lim = commune("75056")
+    return alg._load_code_insee_layer(
+        "STATISTICALUNITS.IRIS:contours_iris", "IRIS (quartiers INSEE)",
+        "75056", b, lim, crs_2154, fb,
     )
 
 
@@ -146,6 +199,13 @@ TESTS = {
     "T6": ("T6 parcelles, page 5000 corrompue une fois", parcelles, "5000:1", 8804),
     "T7": ("T7 piste d'aérodrome (vide sur l'emprise), serveur réel", piste, None, 8800),
     "T8": ("T8 typename inexistant, serveur réel", bogus, None, 8800),
+    "T9": ("T9 bâti, GetCapabilities muet une fois", bati, "hang@caps:1", 8805),
+    "T10": ("T10 bâti, GetCapabilities muet à jamais", bati, "hang@caps:99", 8806),
+    "T11": ("T11 bâti, vérification COUNT=1 muette à jamais", bati, "hang@probe:99", 8807),
+    "T12": ("T12 bâti, première page muette une fois", bati, "hang@0:1", 8808),
+    "T13": ("T13 bâti, DescribeFeatureType muet à jamais", bati, "hang@describe:99", 8809),
+    "T14": ("T14 parcelles Paris 13e (arrondissement), serveur réel", parcelles_paris13, None, 8800),
+    "T15": ("T15 IRIS Paris entier (filtre vide), serveur réel", iris_paris, None, 8800),
 }
 for tid in (sys.argv[1:] or TESTS):
     run(*TESTS[tid])

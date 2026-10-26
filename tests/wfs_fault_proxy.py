@@ -3,29 +3,47 @@
 Mandataire local d'injection de pannes pour le WFS Géoplateforme.
 
 Relaie toute requête vers https://data.geopf.fr telle quelle, sauf les
-GetFeature dont le STARTINDEX figure dans FAULTS : pour ceux-là, les N
-premières requêtes reçoivent le dump de métriques Prometheus/JMX capturé
-(HTTP 200, text/plain) — exactement ce que la passerelle Géoplateforme
-renvoie lors d'un mauvais routage — puis passent normalement. Les réponses
-GetCapabilities sont réécrites pour que les requêtes suivantes de QGIS
-(GetFeature, DescribeFeatureType) transitent aussi par ce mandataire.
+requêtes visées par une panne, dont les N premières occurrences échouent
+puis passent normalement. Deux pannes :
 
-Usage :  python wfs_fault_proxy.py PORT [STARTINDEX:N,STARTINDEX:N…]
+  STARTINDEX:N       GetFeature de ce STARTINDEX → dump de métriques
+                     Prometheus/JMX capturé (HTTP 200, text/plain) —
+                     exactement ce que la passerelle Géoplateforme renvoie
+                     lors d'un mauvais routage ;
+  hang@CIBLE:N       serveur muet : connexion tenue ouverte sans un octet
+                     pendant HANG_S secondes (> délai réseau de QGIS, 60 s
+                     par défaut), puis fermée. CIBLE : caps (GetCapabilities),
+                     describe (DescribeFeatureType), probe (GetFeature
+                     COUNT=1 — la vérification que QGIS fait à la création de
+                     la couche) ou un STARTINDEX (page, hors COUNT=1).
+
+Les réponses GetCapabilities sont réécrites pour que les requêtes suivantes
+de QGIS (GetFeature, DescribeFeatureType) transitent aussi par ce mandataire.
+
+Usage :  python wfs_fault_proxy.py PORT [PANNE,PANNE…]
+         (durée du silence : variable d'environnement WFS_PROXY_HANG_S, 75 s)
 Voir docs/WFS ROBUSTESSE.md et tests/test_wfs_loader.py.
 """
+import http.client
 import os
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
-FAULTS = {}
+FAULTS = {}  # STARTINDEX → nb de pages Prometheus restant à injecter
+HANGS = {}   # cible → nb de silences restant à infliger
 for spec in (sys.argv[2].split(",") if len(sys.argv) > 2 and sys.argv[2] else []):
-    start_index, n = spec.split(":")
-    FAULTS[start_index] = int(n)
+    target, n = spec.rsplit(":", 1)
+    if target.startswith("hang@"):
+        HANGS[target[len("hang@"):]] = int(n)
+    else:
+        FAULTS[target] = int(n)
+HANG_S = float(os.environ.get("WFS_PROXY_HANG_S", "75"))
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 PROM_BODY = open(os.path.join(_HERE, "fixtures", "geopf_misroute_prometheus.txt"), "rb").read()
@@ -47,14 +65,32 @@ class _Handler(BaseHTTPRequestHandler):
         }
         # QGIS omet STARTINDEX sur la première page : on la traite comme « 0 ».
         start_index = query.get("STARTINDEX", "0")
+        count = query.get("COUNT") or query.get("MAXFEATURES")
+        request = query.get("REQUEST", "").lower()
         is_getfeature = (
-            query.get("REQUEST", "").lower() == "getfeature"
+            request == "getfeature"
             and query.get("RESULTTYPE", "").lower() != "hits"
         )
+        if request == "getcapabilities":
+            target = "caps"
+        elif request == "describefeaturetype":
+            target = "describe"
+        elif is_getfeature:
+            target = "probe" if count == "1" else start_index
+        else:
+            target = None
         with _lock:
-            inject = is_getfeature and FAULTS.get(start_index, 0) > 0
+            hang = target is not None and HANGS.get(target, 0) > 0
+            if hang:
+                HANGS[target] -= 1
+            inject = not hang and is_getfeature and FAULTS.get(start_index, 0) > 0
             if inject:
                 FAULTS[start_index] -= 1
+        if hang:
+            print(f"HANG {target} {HANG_S:.0f} s (reste {HANGS[target]})", flush=True)
+            time.sleep(HANG_S)
+            self.close_connection = True
+            return
         if inject:
             print(f"INJECT prometheus STARTINDEX={start_index} (reste {FAULTS[start_index]})", flush=True)
             # Mêmes en-têtes de cache que la vraie passerelle (Kong renvoie
@@ -73,10 +109,23 @@ class _Handler(BaseHTTPRequestHandler):
                 body, ctype, status = r.read(), r.headers.get("Content-Type", "application/octet-stream"), r.status
         except urllib.error.HTTPError as e:
             body, ctype, status = e.read(), e.headers.get("Content-Type", "text/plain"), e.code
-        if query.get("REQUEST", "").lower() == "getcapabilities":
+        except (OSError, http.client.HTTPException) as e:
+            # Vraie panne en amont (délai, transfert coupé…) : la relayer telle
+            # quelle — connexion fermée sans réponse — comme QGIS la verrait.
+            print(f"UPSTREAM-FAIL {type(e).__name__} {request} "
+                  f"STARTINDEX={start_index} COUNT={count}", flush=True)
+            self.close_connection = True
+            return
+        if request == "getcapabilities":
             body = body.replace(b"https://data.geopf.fr/wfs", LOCAL.encode() + b"/wfs")
-        print(f"PASS {status} {len(body)} o REQUEST={query.get('REQUEST')} STARTINDEX={start_index}", flush=True)
-        self._send(status, ctype, body)
+        print(f"PASS {status} {len(body)} o REQUEST={query.get('REQUEST')} "
+              f"STARTINDEX={start_index} COUNT={count}", flush=True)
+        try:
+            self._send(status, ctype, body)
+        except OSError:
+            # QGIS a abandonné (délai réseau) avant que l'amont ne réponde.
+            print(f"CLIENT-GONE {request} STARTINDEX={start_index}", flush=True)
+            self.close_connection = True
 
     def _send(self, status, ctype, body, extra=None):
         self.send_response(status)
@@ -89,5 +138,5 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"mandataire sur {LOCAL}, pannes={FAULTS}", flush=True)
+    print(f"mandataire sur {LOCAL}, pannes={FAULTS}, silences={HANGS}", flush=True)
     ThreadingHTTPServer(("127.0.0.1", PORT), _Handler).serve_forever()

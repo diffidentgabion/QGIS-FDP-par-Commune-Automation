@@ -11,6 +11,7 @@ Installation :
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import time
 import traceback
@@ -1359,7 +1360,8 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 # Parcelles et IRIS : filtre code_insee + matérialisation sans
                 # découpage (ils épousent déjà la limite communale) — bien plus
                 # rapide. Repli automatique sur bbox + découpage si le filtre
-                # ne donne rien (Paris/Lyon/Marseille, taguées par arrondissement).
+                # ne donne rien (IRIS de Paris/Lyon/Marseille entières, étiquetés
+                # par arrondissement — voir _PLM_ARRONDISSEMENTS).
                 layer = self._load_code_insee_layer(
                     entry["typename"], entry["display_name"], insee,
                     bbox, boundary_layer, crs_2154, feedback,
@@ -2133,18 +2135,69 @@ class FDPParCommune(QgsProcessingAlgorithm):
             return status, None, "réponse vide"
         return status, content, None
 
-    def _wfs_open(self, uri, display_name, rect, feedback):
+    _WFS_CHECK_TIMEOUT_MS = 30_000
+
+    def _wfs_typename_unknown(self, typename, feedback):
+        """
+        Vrai seulement si Géoplateforme affirme que `typename` n'existe pas.
+
+        Une couche WFS invalide a deux causes que QGIS ne distingue que par un
+        libellé traduit : typename inconnu — définitif, la couche est ignorée —
+        ou serveur muet pendant GetCapabilities / DescribeFeatureType. Ce
+        second cas est passager (constaté le 2026-10-23 : une requête sur trois
+        sans un octet pendant 2 min, les autres servies en 0,6 s), et ignorer
+        la couche amputerait l'import en silence — le bâti et tout ce qui en
+        dérive. On pose donc la question au serveur : à un typename inconnu il
+        répond HTTP 400 (ExceptionReport « Could not find type »). Toute autre
+        issue (schéma, délai dépassé, 5xx…) compte comme une panne passagère.
+        """
+        status, _, _ = self._http_get(
+            f"{_WFS_URL}?SERVICE=WFS&VERSION=2.0.0&REQUEST=DescribeFeatureType"
+            f"&TYPENAMES={typename}",
+            feedback,
+            timeout_ms=self._WFS_CHECK_TIMEOUT_MS,
+        )
+        return status == 400
+
+    def _wfs_hits(self, typename, cql, feedback):
+        """
+        Nombre d'entités de `typename` retenues par le filtre CQL `cql` (déjà
+        encodé), ou None si le serveur ne répond pas.
+
+        À demander AVANT de créer la couche QGIS, pas par featureCount() : à sa
+        création, le fournisseur WFS lit une première entité (STARTINDEX=0&
+        COUNT=1). Si le filtre ne retient RIEN, Géoplateforme parcourt alors
+        toute la table dans l'ordre des identifiants sans rien trouver : plus
+        de 60 s, HTTP 504 côté serveur, « L'opération est annulée » côté QGIS,
+        trois relances comprises — 4 min perdues avant le repli. Mesuré le
+        2026-10-23 sur les parcelles, code_insee='75113' : la lecture d'une
+        entité > 60 s à chaque fois, ce comptage 0,3 s.
+        """
+        status, content, panne = self._http_get(
+            f"{_WFS_URL}?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
+            f"&TYPENAMES={typename}&RESULTTYPE=hits&CQL_FILTER={cql}",
+            feedback,
+            timeout_ms=self._WFS_CHECK_TIMEOUT_MS,
+        )
+        if panne is not None:
+            return None
+        match = re.search(rb'numberMatched="(\d+)"', content)
+        return int(match.group(1)) if match else None
+
+    def _wfs_open(self, uri, typename, display_name, rect, feedback):
         """
         Crée la couche WFS `uri` et télécharge `rect` de façon vérifiée, en
         recréant la couche après un délai si Géoplateforme a renvoyé une
-        réponse corrompue.
+        réponse corrompue ou n'a pas répondu.
 
-        Renvoie (layer, nb_entités) — ou None si la couche reste invalide
-        (typename inconnu…), comme avant. Lève une exception si le
-        téléchargement reste incomplet : jamais de couche partielle.
+        Renvoie (layer, nb_entités) — ou None si le serveur confirme que le
+        typename n'existe pas. Lève une exception si la couche reste invalide
+        ou le téléchargement incomplet : jamais de couche absente ou partielle
+        par simple panne réseau.
         """
         n_attempts = len(self._WFS_RETRY_DELAYS) + 1
         problem = None
+        typename_checked = False
         for attempt in range(1, n_attempts + 1):
             if attempt > 1:
                 delay = self._WFS_RETRY_DELAYS[attempt - 2]
@@ -2158,6 +2211,13 @@ class FDPParCommune(QgsProcessingAlgorithm):
                     break
             layer = QgsVectorLayer(uri, display_name, "WFS")
             if not layer.isValid():
+                # Une seule question au serveur : s'il répond, la réponse ne
+                # change pas d'un essai à l'autre ; s'il est muet, la reposer
+                # ajouterait 30 s à chaque essai.
+                if not typename_checked:
+                    typename_checked = True
+                    if self._wfs_typename_unknown(typename, feedback):
+                        return None
                 problem = "couche invalide"
                 continue
             n, error = self._wfs_download(layer, rect)
@@ -2166,7 +2226,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
             problem = f"téléchargement incomplet ({error})"
             self._purge_network_cache()
 
-        if feedback.isCanceled() or problem == "couche invalide":
+        if feedback.isCanceled():
             return None
         raise Exception(
             f"{display_name} : Géoplateforme WFS en échec après {n_attempts} "
@@ -2190,8 +2250,9 @@ class FDPParCommune(QgsProcessingAlgorithm):
 
         `insee` (facultatif) déclenche les enrichissements qui ont besoin du
         code commune — aujourd'hui l'année de construction du bâti.
-        Renvoie None (avec avertissement) si la couche est invalide ; lève une
-        exception si Géoplateforme ne livre pas la couche complète.
+        Renvoie None (avec avertissement) si le typename n'existe pas ; lève
+        une exception si Géoplateforme ne livre pas la couche complète ou ne
+        répond pas.
         """
         # URI WFS — le paramètre BBOX attend : minX,minY,maxX,maxY,CRS.
         # NB : le fournisseur WFS de QGIS ne conserve pas la valeur de BBOX
@@ -2208,10 +2269,13 @@ class FDPParCommune(QgsProcessingAlgorithm):
             f"&TYPENAME={typename}&SRSNAME=EPSG:2154&BBOX={bbox_str}"
         )
 
-        opened = self._wfs_open(uri, display_name, bbox, feedback)
+        opened = self._wfs_open(uri, typename, display_name, bbox, feedback)
         if opened is None:
             if not feedback.isCanceled():
-                feedback.pushWarning(f"⚠  {display_name} — couche invalide")
+                feedback.pushWarning(
+                    f"⚠  {display_name} — couche invalide "
+                    f"(« {typename} » inconnu de Géoplateforme)"
+                )
             return None
         layer, n_downloaded = opened
         feedback.pushInfo(f"   ✓  {n_downloaded} entité(s) téléchargée(s)")
@@ -2258,6 +2322,30 @@ class FDPParCommune(QgsProcessingAlgorithm):
     # manifestement pas été appliqué (récupération nationale) → repli bbox+clip.
     _PARCELLE_MAX = 500000
 
+    # Arrondissements municipaux de Paris, Lyon et Marseille → commune parente.
+    # Le Parcellaire Express étiquette leurs parcelles par la commune PARENTE
+    # (code_insee='75056') et l'arrondissement (code_arr='113' : le code
+    # 75113 privé du département) — code_insee='75113' ne retient rien. Les
+    # IRIS, eux, portent le code d'arrondissement (et rien sous 75056).
+    # Vérifié le 2026-10-23 : Paris 13e 4 641 parcelles, Lyon 3e 6 447,
+    # Marseille 1er 4 375 ; IRIS 75113 : 73.
+    _PLM_ARRONDISSEMENTS = {
+        "75056": range(75101, 75121),
+        "69123": range(69381, 69390),
+        "13055": range(13201, 13217),
+    }
+    _PARCELLE_TYPENAME = "CADASTRALPARCELS.PARCELLAIRE_EXPRESS:parcelle"
+
+    @classmethod
+    def _code_insee_filter(cls, typename, insee):
+        """Attributs → valeurs du filtre de la voie rapide (voir ci-dessus)."""
+        insee = str(insee)
+        if typename == cls._PARCELLE_TYPENAME and insee.isdigit():
+            for parent, codes in cls._PLM_ARRONDISSEMENTS.items():
+                if int(insee) in codes:
+                    return {"code_insee": parent, "code_arr": insee[2:]}
+        return {"code_insee": insee}
+
     def _load_code_insee_layer(self, typename, display_name, insee, bbox,
                                boundary_layer, crs_2154, feedback):
         """
@@ -2270,15 +2358,20 @@ class FDPParCommune(QgsProcessingAlgorithm):
         code_insee renvoie exactement le même ensemble que bbox+clip, tout
         en évitant (a) la sur-collecte des entités voisines et surtout (b) le
         native:clip de dizaines de milliers de polygones — l'étape la plus lente.
+        Parcelles des arrondissements PLM : filtre commune parente + code_arr
+        (voir _PLM_ARRONDISSEMENTS).
 
         Résultat matérialisé en couche mémoire (pas de couche WFS vive dans le
-        projet). Repli automatique sur bbox+clip si le filtre renvoie 0 (Paris/
-        Lyon/Marseille entières : parcelles taguées par arrondissement) ou un
-        nombre invraisemblable (filtre non honoré par le serveur).
+        projet). Repli automatique sur bbox+clip si le filtre ne retient rien
+        (IRIS de Paris/Lyon/Marseille entières, étiquetés par arrondissement)
+        ou un nombre invraisemblable (filtre non honoré par le serveur) —
+        décidé par un comptage préalable, voir _wfs_hits.
         """
         from urllib.parse import quote
 
-        cql = quote(f"code_insee='{insee}'")
+        attrs = self._code_insee_filter(typename, insee)
+        cql_text = " AND ".join(f"{k}='{v}'" for k, v in attrs.items())
+        cql = quote(cql_text)
         uri = (
             f"{_WFS_URL}"
             "?SERVICE=WFS&VERSION=2.0.0&REQUEST=GetFeature"
@@ -2293,6 +2386,16 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 typename, display_name, bbox, boundary_layer, crs_2154, feedback,
                 insee,
             )
+
+        # Compter avant de créer la couche : un filtre qui ne retient rien
+        # coûterait 4 min au fournisseur WFS de QGIS (voir _wfs_hits).
+        n = self._wfs_hits(typename, cql, feedback)
+        if feedback.isCanceled():
+            return None
+        if n is None:
+            return _fallback("comptage impossible (Géoplateforme injoignable)")
+        if n <= 0 or n > self._PARCELLE_MAX:
+            return _fallback(f"filtre {cql_text} inutilisable (n={n})")
 
         # Même parade que _wfs_open contre les réponses corrompues de
         # Géoplateforme : téléchargement vérifié, vidage du cache, nouvelle
@@ -2314,17 +2417,18 @@ class FDPParCommune(QgsProcessingAlgorithm):
                         break
 
                 layer = QgsVectorLayer(uri, display_name, "WFS")
-                n = layer.featureCount() if layer.isValid() else 0
-                if n <= 0 or n > self._PARCELLE_MAX:
-                    return _fallback(f"filtre code_insee inutilisable (n={n})")
+                if not layer.isValid():
+                    return _fallback("couche filtrée invalide")
 
                 # Sécurité : vérifier que le filtre s'applique bien aux ENTITÉS (pas
-                # seulement au comptage). On lit une entité témoin ; si son code_insee
-                # ne correspond pas, le provider ignore le CQL → repli (évite un
+                # seulement au comptage). On lit une entité témoin ; si ses attributs
+                # ne correspondent pas, le provider ignore le CQL → repli (évite un
                 # téléchargement national qui ferait exploser la mémoire).
                 sample = next(layer.getFeatures(QgsFeatureRequest().setLimit(1)), None)
-                if sample is None or str(sample["code_insee"]) != str(insee):
-                    got = None if sample is None else sample["code_insee"]
+                if sample is None or any(
+                    str(sample[k]) != v for k, v in attrs.items()
+                ):
+                    got = None if sample is None else {k: sample[k] for k in attrs}
                     return _fallback(f"filtre non appliqué aux entités (témoin={got})")
 
                 n_downloaded, error = self._wfs_download(layer, None)
@@ -2346,7 +2450,7 @@ class FDPParCommune(QgsProcessingAlgorithm):
                 pr.addFeatures(list(layer.getFeatures()))
                 mem.updateExtents()
                 feedback.pushInfo(
-                    f"   ✓  {mem.featureCount()} entité(s) (filtre code_insee)"
+                    f"   ✓  {mem.featureCount()} entité(s) (filtre {cql_text})"
                 )
                 self._post_load_extras(mem, typename, insee, feedback)
                 return mem

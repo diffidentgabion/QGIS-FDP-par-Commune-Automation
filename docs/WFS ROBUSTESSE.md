@@ -1,4 +1,4 @@
-# Robustesse du chargement WFS — réponses corrompues de Géoplateforme
+# Robustesse du chargement WFS — réponses corrompues et silences de Géoplateforme
 
 *Diagnostic et correctif du 2026-09-04, à la suite d'un import du Mans où
 « la moitié des bâtiments » manquait.*
@@ -85,6 +85,8 @@ trois outils d'import) et par la voie rapide des parcelles :
 4. après 4 tentatives : **exception explicite** (« Géoplateforme WFS en échec
    … Relancer l'import »). Jamais de couche partielle. En import en lot, la
    commune est signalée et ignorée ; en ajout de couches, la couche l'est.
+   Même issue, depuis le 2026-10-23, quand la couche ne s'ouvre pas parce que
+   le serveur est muet (§7).
 
 Voie rapide des parcelles (filtre `code_insee`) : même contrôle et même
 vidage, un seul nouvel essai, puis repli sur bbox + découpage (parade
@@ -100,7 +102,9 @@ jamais rien et ajoutait un aller-retour exposé au même défaut.
 ## 5. Vérification
 
 `tests/wfs_fault_proxy.py` : mandataire local qui relaie vers data.geopf.fr et
-injecte la réponse Prometheus pour des `STARTINDEX` choisis, N fois.
+injecte la réponse Prometheus pour des `STARTINDEX` choisis, N fois — ou,
+depuis le §7, un silence (`hang@caps`, `hang@describe`, `hang@probe`,
+`hang@STARTINDEX`).
 `tests/test_wfs_loader.py` : exécute le vrai `_load_wfs_layer` /
 `_load_parcelle_layer` sur Le Mans, serveur réel puis pannes injectées
 (page centrale corrompue une fois / à jamais, première page corrompue,
@@ -137,3 +141,133 @@ Avant correctif, 9 téléchargements de contrôle du bâti du Mans avaient rendu
 91 536 entités chacun (emprise géo API légèrement différente de T1) : le
 défaut ne se manifeste que lorsqu'une page tombe sur le mauvais routage, puis
 persiste via le cache.
+
+## 7. Serveur muet (délais dépassés) — 2026-10-23
+
+### Symptôme
+
+Journal QGIS (onglet WFS) : des rafales de *« Le téléchargement des entités
+à échoué : L'opération est annulée »*, *« Relance de la requête … 1/3 »*
+espacées d'exactement 60 s, et *« Échec de GetCapabilities pour l'URL … :
+L'opération est annulée »*. Toutes les sortes de requêtes sont touchées.
+
+### Cause
+
+`data.geopf.fr` laisse parfois une requête sans **un seul octet** de réponse.
+Mesuré le 2026-10-23 : un GetCapabilities sur trois (5,5 Mo, servi
+d'ordinaire en 0,6 s) muet pendant 120 s ; pendant les tests, aussi un HTTP
+500 sur GetCapabilities et des transferts coupés en cours de page. QGIS
+abandonne au bout de son délai réseau (60 s par défaut, Options › Réseau —
+réglage de l'utilisateur, que les scripts ne modifient pas) : c'est
+« L'opération est annulée ».
+
+### Effet selon la requête (vérifié au mandataire, `hang@…`)
+
+| Requête muette | Réaction de QGIS | Effet sur l'import |
+|---|---|---|
+| GetCapabilities | aucune relance : couche invalide | **avant correctif : couche ignorée en silence** |
+| DescribeFeatureType | aucune relance : couche invalide | **idem** |
+| GetFeature `COUNT=1` (vérification à la création de la couche, sans BBOX) | 3 relances (4 min), puis continue | aucun : couche valide, même type, même compte (T11) |
+| page GetFeature | relance ; si les 4 essais échouent → `provider.errors()` | aucun : parade du §4 |
+
+Le cas grave : `_wfs_open` traitait toute couche invalide comme un typename
+inexistant (T8) — 4 essais, puis `None` et un simple avertissement
+« couche invalide ». L'import continuait **sans la couche et tout ce qui en
+dérive** (pour le bâti : placement SIRENE, catégories d'activité, analyse du
+bâti) et l'import en lot comptait la commune comme réussie. Exactement la
+troncature silencieuse que le §4 devait empêcher, par une autre voie.
+
+### Correctif (`fdp_par_commune.py`)
+
+À la première couche invalide, `_wfs_typename_unknown` pose la question au
+serveur : un DescribeFeatureType direct (`_http_get`, sans cache, délai 30 s,
+annulable). À un typename inconnu Géoplateforme répond **HTTP 400**
+(`ExceptionReport` « Could not find type ») : la couche est ignorée tout de
+suite, avec un avertissement qui nomme le typename. Toute autre issue (schéma,
+délai dépassé, 5xx…) est une panne passagère : les essais continuent, puis
+**exception** « Géoplateforme WFS en échec après 4 tentatives — couche
+invalide. Relancer l'import. » La question n'est posée qu'une fois : muet, le
+serveur coûterait 30 s de plus à chaque essai.
+
+Effet de bord : T8 rend désormais la main en ~1 s avec un seul avertissement,
+au lieu de 18 s et quatre.
+
+Parcelles et IRIS (voie rapide `code_insee`) : une couche invalide donne
+n=0, donc le repli bbox + découpage (« filtre code_insee inutilisable
+(n=0) » — libellé trompeur dans ce cas, mais comportement correct), qui passe
+par `_wfs_open` et bénéficie du correctif.
+
+### Coût en temps
+
+Chaque silence coûte 60 s ; la vérification `COUNT=1` jusqu'à 4 min (les
+entrées `batiment … COUNT=1` du journal). Un serveur durablement muet : environ
+4 à 5 min par couche, puis exception.
+
+### Artefact de journal à ignorer
+
+`…cql_filter=code_insee3D%2775114%27…` dans *« Relance de la requête »* (le
+`%` de `%3D` a disparu) n'est pas une requête malformée : QGIS compose ce
+message par `QString::arg()` enchaînés et le troisième argument (le maximum
+de relances, 3) remplace le `%3` de l'URL. La ligne GetCapabilities montre la
+vraie URL, avec `%3D`.
+
+### Résultats du 2026-10-23
+
+Le Mans (72181), QGIS 3.40.15 LTR, silences de 75 s injectés. Les tests au
+mandataire relaient le reste vers le vrai serveur, lui-même instable ce
+jour-là (T1 a subi un vrai silence).
+
+| Test | Avant correctif | Après correctif | Mandataire |
+|---|---|---|---|
+| T1 bâti, serveur réel | 73 424, 1 avert. (vrai silence récupéré) | — | — |
+| T8 typename inexistant | None, 4 avert., 18 s | None, 1 avert., 1,1 s | — |
+| T9 GetCapabilities muet une fois | 73 424, 1 avert. | (inchangé) | 1 silence |
+| T10 GetCapabilities muet à jamais | **None**, 4 avert., 257 s | **exception**, 3 avert., 258 s | 4 silences ; vérification DescribeFeatureType → 200 |
+| T11 vérif. `COUNT=1` muette à jamais | 73 424, MultiPolygon, 0 avert., 358 s | (inchangé) | 4 silences |
+| T12 première page muette une fois | 73 424, 0 avert. | (inchangé) | 1 silence |
+| T13 DescribeFeatureType muet à jamais | **None**, 4 avert., 263 s | **exception**, 3 avert., 291 s | 4 silences + 1 (la vérification, 30 s) |
+
+## 8. Filtre attributaire qui ne retient rien : 4 min perdues — 2026-10-23
+
+### Symptôme
+
+Import d'un arrondissement de Paris : le journal QGIS aligne, pour les
+parcelles, quatre *« Relance de la requête …cql_filter=code_insee='75113'…
+STARTINDEX=0&COUNT=1 »* à une minute d'intervalle, à chaque import et pour
+chaque arrondissement. Ce n'est pas une panne passagère (§7) : c'est
+reproductible à 100 %.
+
+### Cause
+
+1. Le Parcellaire Express n'étiquette pas les parcelles des arrondissements
+   PLM par leur code d'arrondissement : une parcelle de Paris 13e porte
+   `code_insee='75056'`, `code_arr='113'` (seul `idu` commence par `75113`).
+   `code_insee='75113'` ne retient donc **aucune** parcelle. Les IRIS font
+   l'inverse : `75113` → 73 IRIS, `75056` → 0.
+2. À la création de la couche, le fournisseur WFS de QGIS lit une première
+   entité (`STARTINDEX=0&COUNT=1`). Avec un filtre qui ne retient rien,
+   Géoplateforme parcourt toute la table dans l'ordre des identifiants sans
+   rien trouver : **HTTP 504 au bout de 60 s** (délai de la passerelle), et
+   QGIS, au même délai, annule puis relance trois fois. Le comptage
+   (`RESULTTYPE=hits`) du même filtre répond en 0,3 s ; un filtre qui retient
+   des entités, en 0,3–0,5 s ; une emprise BBOX vide aussi (index spatial).
+3. Le script voyait ensuite `featureCount() == 0` et se repliait sur
+   bbox + découpage — mais 4 min plus tard, à chaque arrondissement.
+
+### Correctif (`fdp_par_commune.py`)
+
+- `_wfs_hits` : comptage direct (`_http_get`, 30 s) **avant** de créer la
+  couche QGIS. Filtre vide ou invraisemblable → repli immédiat ; comptage
+  impossible (serveur muet) → repli aussi, la voie bbox ayant toutes les
+  parades des §4 et §7.
+- `_code_insee_filter` / `_PLM_ARRONDISSEMENTS` : parcelles d'un
+  arrondissement PLM filtrées par `code_insee='<commune parente>' AND
+  code_arr='<code sans département>'` — voie rapide exacte au lieu du repli.
+  L'entité témoin est vérifiée sur tous les attributs du filtre.
+
+| Test (serveur réel) | Avant | Après |
+|---|---|---|
+| T14 parcelles Paris 13e | 4 min de relances, puis repli bbox | 4 641 par filtre, 5,7 s |
+| T15 IRIS Paris entier | 4 min de relances, puis repli bbox | repli immédiat, 4,4 s |
+| T5 parcelles Le Mans | 55 479 | 55 479 (inchangé) |
+| T6 parcelles, page corrompue | 55 479, 1 avert. | 55 479, 1 avert. (inchangé) |
